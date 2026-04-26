@@ -55,6 +55,11 @@ TEST_PROMPTS: dict[str, str] = {
     "overhead_squat": "OVERHEAD SQUAT - bar/dowel overhead",
     "proprio":        "PROPRIOCEPTION - follow target cue",
     "free_exercise":  "FREE EXERCISE - perform reps when ready",
+    # Phase V1 — barbell strength assessment with multi-set protocol.
+    # Single session = one exercise × N sets (3-5) of target_reps reps,
+    # with a fixed inter-set rest. Set ends are operator-driven (manual
+    # button), rest auto-transitions to next set after rest_s seconds.
+    "strength_3lift": "STRENGTH (bench/squat/deadlift) - 3-5 sets",
 }
 
 STANCE_LABEL: dict[str, str] = {
@@ -104,6 +109,15 @@ class RecorderConfig:
     # Encoder hardware usage (non-balance tests). When False, replay hides
     # encoder timeseries + bars so the user knows no bar/rod was attached.
     uses_encoder:         bool  = True
+    # ── Strength 3-lift multi-set (Phase V1-D) ───────────────────────────
+    # Active only when test == "strength_3lift". The recorder cycles
+    # through `n_sets` recordings separated by `rest_s` of inter-set rest.
+    # Set ends are operator-driven via end_set(); rest auto-transitions.
+    exercise:        Optional[str] = None    # bench_press|back_squat|deadlift
+    n_sets:          int           = 3       # 3, 4, or 5
+    target_reps:     int           = 12      # informational target (reps to failure)
+    rest_s:          float         = 30.0    # inter-set rest (forced timer)
+    warmup_set:      bool          = True    # if True, set 0 is a warmup (excluded from 1RM)
     # Session folder
     sessions_dir:        Optional[Path] = None   # default: config.SESSIONS_DIR
     session_name_suffix: Optional[str]  = None   # appended after timestamp
@@ -115,11 +129,26 @@ class RecorderConfig:
         # weight vest on a 93 kg subject -> effective load 113 kg).
         if self.use_bodyweight_load and self.subject_kg > 0:
             self.load_kg = float(self.load_kg) + float(self.subject_kg)
+        # Validate multi-set strength config when that test is selected.
+        if self.test == "strength_3lift":
+            if self.exercise not in ("bench_press", "back_squat", "deadlift"):
+                raise ValueError(
+                    f"strength_3lift requires exercise ∈ "
+                    f"(bench_press, back_squat, deadlift), got {self.exercise!r}")
+            if not (3 <= self.n_sets <= 5):
+                raise ValueError(
+                    f"strength_3lift n_sets must be 3-5, got {self.n_sets}")
+            if self.rest_s < 1.0:
+                raise ValueError(
+                    f"strength_3lift rest_s must be ≥ 1s, got {self.rest_s}")
 
 
 @dataclass
 class RecorderState:
-    phase: str = "idle"          # idle / wait / countdown / recording / done / cancelled
+    # phase: idle / wait / countdown / recording / inter_set_rest / done / cancelled
+    # ``inter_set_rest`` is only used by the strength_3lift multi-set test;
+    # all other tests transition recording → done directly.
+    phase: str = "idle"
     prompt: str = ""
     elapsed_s: float = 0.0       # within current phase
     total_s: float = 0.0         # recording duration target
@@ -128,6 +157,13 @@ class RecorderState:
     zero_cal_remaining_s: float = 0.0  # countdown during zero-cal
     stim_banner: Optional[str] = None
     n_stim_fired: int = 0
+    # ── Multi-set strength assessment (Phase V1-D) ─────────────────────
+    # Populated only when test == "strength_3lift". The current set
+    # being recorded (or just rested between) and the rest countdown.
+    current_set_idx:     int   = 0       # 0-based; 0 = first set (or warmup)
+    n_sets:              int   = 0       # total sets (= cfg.n_sets), 0 if not multi-set
+    rest_remaining_s:    float = 0.0     # seconds left in current inter-set rest
+    rest_paused:         bool  = False   # operator pressed pause during rest
 
 
 # Callback typedefs (all optional)
@@ -222,6 +258,27 @@ class SessionRecorder:
         self._cancel = threading.Event()
         self._running = False
 
+        # ── Multi-set strength assessment (Phase V1-D) ─────────────────
+        # Active only when cfg.test == "strength_3lift". The state machine
+        # cycles recording → inter_set_rest → recording across n_sets,
+        # driven by external triggers (end_set / pause_rest / resume_rest /
+        # skip_rest / end_session) plus the rest countdown.
+        self._sets: list[dict] = []                # boundary records, one per completed set
+        self._current_set_idx: int = 0
+        self._set_t_start_s: Optional[float] = None  # phase_s when current set started
+        # Rest timing — wall-clock-anchored countdown (PlaybackController
+        # pattern). _rest_t0_ns is the monotonic instant rest started;
+        # _rest_paused_at_ns is non-None while paused.
+        self._rest_t0_ns: Optional[int] = None
+        self._rest_pause_accum_ns: int = 0
+        self._rest_paused_at_ns: Optional[int] = None
+        # External triggers — set by the operator-facing methods, consumed
+        # by the next tick of the run loop. Single-flag booleans are
+        # atomic in CPython so no lock is needed for these.
+        self._trig_end_set: bool      = False
+        self._trig_skip_rest: bool    = False
+        self._trig_end_session: bool  = False
+
     # ── public API ──────────────────────────────────────────────────────────
     def set_callbacks(self, *, on_camera_frame: Optional[CameraFrameCB] = None,
                       on_daq_frame: Optional[DaqFrameCB] = None,
@@ -233,6 +290,47 @@ class SessionRecorder:
     def cancel(self) -> None:
         """Request early termination. Safe to call from any thread."""
         self._cancel.set()
+
+    # ── Multi-set strength assessment controls (Phase V1-D) ────────────────
+    # All four are safe to call from any thread; they just flip flags
+    # the next ``_run_loop`` tick consumes. They have no effect for
+    # tests other than ``strength_3lift``.
+
+    def end_set(self) -> None:
+        """Operator-driven "세트 종료" — close the current set and
+        transition to inter-set rest (or to ``done`` if it was the
+        last set). Called from the GUI button.
+        """
+        self._trig_end_set = True
+
+    def pause_rest(self) -> None:
+        """Pause the inter-set rest countdown. Subject can call this if
+        they need extra time. Has no effect outside the rest phase."""
+        if self._state.phase != "inter_set_rest":
+            return
+        if self._rest_paused_at_ns is None:
+            self._rest_paused_at_ns = time.monotonic_ns()
+            self._state.rest_paused = True
+
+    def resume_rest(self) -> None:
+        """Resume a paused rest countdown."""
+        if self._state.phase != "inter_set_rest":
+            return
+        if self._rest_paused_at_ns is not None:
+            self._rest_pause_accum_ns += (
+                time.monotonic_ns() - self._rest_paused_at_ns)
+            self._rest_paused_at_ns = None
+            self._state.rest_paused = False
+
+    def skip_rest(self) -> None:
+        """Skip the remaining rest and start the next set immediately."""
+        self._trig_skip_rest = True
+
+    def end_session(self) -> None:
+        """Operator-driven "세션 종료" — finalize the session, saving
+        whatever sets have been completed so far. Distinct from
+        ``cancel()`` (which discards the recording entirely)."""
+        self._trig_end_session = True
 
     def manual_reaction(self, response_type: str) -> None:
         """Queue a reaction stimulus / VRT cue from the operator.
@@ -411,12 +509,20 @@ class SessionRecorder:
             # Drain camera queue → forward frames via callback
             self._drain_cameras()
 
+            # Operator-pressed end-session has highest priority — it can
+            # land in any phase and immediately concludes the session
+            # with whatever sets/data have been recorded so far.
+            if self._trig_end_session and self._state.phase != "done":
+                self._handle_end_session(now_ns)
+
             if self._state.phase == "wait":
                 self._tick_wait(now_ns, stability_arm_ns)
             elif self._state.phase == "countdown":
                 self._tick_countdown(now_ns)
             elif self._state.phase == "recording":
                 self._tick_recording(now_ns)
+            elif self._state.phase == "inter_set_rest":
+                self._tick_inter_set_rest(now_ns)
             elif self._state.phase in ("done", "cancelled"):
                 break
 
@@ -479,20 +585,41 @@ class SessionRecorder:
             self._transition_to_recording(now_ns)
 
     def _transition_to_recording(self, now_ns: int) -> None:
+        """Enter the recording phase. For single-set tests this is the
+        one-and-only recording. For ``strength_3lift`` this is invoked
+        again at the start of each set (set 0, 1, 2, ...); _record_ready,
+        _daq_frames and rec_start are only initialised on the FIRST set
+        so the entire session is one continuous DAQ stream + one mp4."""
+        is_first_recording = (self._rec_start_wall is None)
         self._state.phase = "recording"
-        self._rec_start_ns   = time.monotonic_ns()
-        self._rec_start_wall = time.time()
         self._t_phase_ns = now_ns
-        self._record_ready.set()
-        with self._daq_lock:
-            self._daq_frames.clear()
-            self._cop_states.clear()
-        # Re-arm the departure tracker so any wait-phase off-plate
-        # state is forgotten now that the timed window starts. The
-        # threshold itself is fixed (subject_kg-derived) and survives
-        # across resets.
-        self._dep_tracker = DepartureEventTracker(min_duration_s=0.05)
-        self._log(f"RECORDING STARTED (waited {self._wait_duration_s:.1f} s)")
+
+        if is_first_recording:
+            self._rec_start_ns   = time.monotonic_ns()
+            self._rec_start_wall = time.time()
+            self._record_ready.set()
+            with self._daq_lock:
+                self._daq_frames.clear()
+                self._cop_states.clear()
+            # Re-arm the departure tracker so any wait-phase off-plate
+            # state is forgotten now that the timed window starts. The
+            # threshold itself is fixed (subject_kg-derived) and survives
+            # across resets.
+            self._dep_tracker = DepartureEventTracker(min_duration_s=0.05)
+            self._log(
+                f"RECORDING STARTED (waited {self._wait_duration_s:.1f} s)")
+
+        # Multi-set: track when the current set started so we can emit
+        # a per-set boundary record when end_set() fires. ``set_t_start_s``
+        # is in session-relative seconds (0 = rec_start_ns).
+        if self.cfg.test == "strength_3lift":
+            self._set_t_start_s = (
+                (time.monotonic_ns() - self._rec_start_ns) / 1e9)
+            self._state.current_set_idx = self._current_set_idx
+            self._state.n_sets = self.cfg.n_sets
+            self._log(
+                f"SET {self._current_set_idx + 1}/{self.cfg.n_sets} "
+                f"started ({'warmup' if self._is_current_set_warmup() else 'working'})")
 
     def _tick_recording(self, now_ns: int) -> None:
         phase_s = (now_ns - self._t_phase_ns) / 1e9
@@ -543,12 +670,128 @@ class SessionRecorder:
             else:
                 self._fall_off_since_ns = None
 
+        # ── Multi-set strength: operator-driven set end ────────────────
+        # The "세트 종료" button sets _trig_end_set. We close the current
+        # set and either go to inter_set_rest (more sets coming) or to
+        # done (this was the last set).
+        if self.cfg.test == "strength_3lift" and self._trig_end_set:
+            self._trig_end_set = False
+            self._close_current_set(phase_s)
+            if self._current_set_idx + 1 >= self.cfg.n_sets:
+                # Last set just finished — done.
+                self._log("ALL SETS COMPLETE")
+                self._state.phase = "done"
+            else:
+                # More sets remain — start inter-set rest.
+                self._enter_inter_set_rest(now_ns)
+            return
+
         # End conditions
         manual_done = (self.cfg.test == "reaction"
                        and self.cfg.trigger == "manual"
                        and len(self._stim_events) >= self.cfg.n_stimuli)
+        if self.cfg.test == "strength_3lift":
+            # Multi-set sessions have NO duration_s timeout. The operator
+            # drives transitions via end_set() / end_session() exclusively.
+            # This prevents the recording from auto-stopping mid-rep when
+            # a slow set runs long.
+            return
         if phase_s >= self.cfg.duration_s or manual_done:
             self._state.phase = "done"
+
+    # ── Multi-set strength assessment helpers (Phase V1-D) ─────────────
+    def _is_current_set_warmup(self) -> bool:
+        """True when the current set should be flagged as warmup
+        (excluded from the 1RM estimate). Per the plan, only set 0
+        is the warmup, and only when ``cfg.warmup_set`` is True."""
+        return bool(self.cfg.warmup_set and self._current_set_idx == 0)
+
+    def _close_current_set(self, phase_s: float) -> None:
+        """Append a boundary record for the set that just finished.
+
+        ``phase_s`` is the current ``recording`` phase elapsed time —
+        we convert to session-relative seconds (0 = rec_start_ns).
+        """
+        # Session-relative end time (consistent with how forces.csv's
+        # t_wall - rec_start gets exposed in analysis).
+        t_end_s = (time.monotonic_ns() - self._rec_start_ns) / 1e9
+        if self._set_t_start_s is None:
+            self._log(
+                f"WARN: _close_current_set with no _set_t_start_s "
+                f"— skipping boundary record")
+            self._set_t_start_s = None
+            return
+        rec = {
+            "set_idx":   self._current_set_idx,
+            "t_start_s": round(self._set_t_start_s, 4),
+            "t_end_s":   round(t_end_s, 4),
+            "warmup":    self._is_current_set_warmup(),
+            "load_kg":   float(self.cfg.load_kg),
+            "exercise":  self.cfg.exercise,
+        }
+        self._sets.append(rec)
+        self._set_t_start_s = None
+        self._log(
+            f"SET {rec['set_idx'] + 1}/{self.cfg.n_sets} closed: "
+            f"{rec['t_end_s'] - rec['t_start_s']:.1f}s"
+            f"{' (warmup)' if rec['warmup'] else ''}")
+
+    def _enter_inter_set_rest(self, now_ns: int) -> None:
+        """Transition recording → inter_set_rest. Sets up the wall-clock
+        anchored countdown — start time + accumulated pause time."""
+        self._state.phase = "inter_set_rest"
+        self._t_phase_ns = now_ns
+        self._rest_t0_ns = time.monotonic_ns()
+        self._rest_pause_accum_ns = 0
+        self._rest_paused_at_ns = None
+        self._state.rest_remaining_s = float(self.cfg.rest_s)
+        self._state.rest_paused = False
+        self._log(f"REST started ({self.cfg.rest_s:.0f}s)")
+
+    def _tick_inter_set_rest(self, now_ns: int) -> None:
+        """Countdown the rest timer. Auto-transitions to next set when
+        elapsed ≥ rest_s. Pause/resume/skip handled here too."""
+        # Skip-rest trigger: jump straight to next set.
+        if self._trig_skip_rest:
+            self._trig_skip_rest = False
+            self._log("REST skipped - starting next set")
+            self._current_set_idx += 1
+            self._transition_to_recording(now_ns)
+            return
+        # Compute elapsed rest time, excluding accumulated pause.
+        if self._rest_paused_at_ns is not None:
+            # Currently paused — elapsed freezes at the pause moment.
+            effective_now = self._rest_paused_at_ns
+        else:
+            effective_now = time.monotonic_ns()
+        elapsed_ns = (effective_now - self._rest_t0_ns
+                      - self._rest_pause_accum_ns)
+        elapsed_s = max(0.0, elapsed_ns / 1e9)
+        remaining = max(0.0, float(self.cfg.rest_s) - elapsed_s)
+        self._state.rest_remaining_s = remaining
+        self._state.elapsed_s = elapsed_s
+        # Auto-transition to next set when timer expires.
+        if remaining <= 0.0 and self._rest_paused_at_ns is None:
+            self._log(f"REST complete - starting next set")
+            self._current_set_idx += 1
+            self._transition_to_recording(now_ns)
+
+    def _handle_end_session(self, now_ns: int) -> None:
+        """Operator-pressed "세션 종료" — finalize from any phase.
+
+        Distinct from cancel(): we keep all the data captured so far.
+        If we're in the middle of a set, close it first so the
+        boundary record is preserved.
+        """
+        self._trig_end_session = False
+        if self._state.phase == "recording":
+            phase_s = (now_ns - self._t_phase_ns) / 1e9
+            self._close_current_set(phase_s)
+        elif self._state.phase == "inter_set_rest":
+            # No active set to close — just stop the timer.
+            pass
+        self._log("SESSION ended by operator")
+        self._state.phase = "done"
 
     def _fire_stim(self, response_type: str, now_ns: int) -> None:
         self._stim_events.append({
@@ -824,6 +1067,17 @@ class SessionRecorder:
             # sessions (pre-G3) keep working.
             "uses_encoder": (None if cfg.test in ("balance_eo", "balance_ec")
                               else cfg.uses_encoder),
+            # ── Strength 3-lift multi-set (Phase V1-D) ────────────────
+            "exercise":     cfg.exercise    if cfg.test == "strength_3lift" else None,
+            "n_sets":       cfg.n_sets      if cfg.test == "strength_3lift" else None,
+            "target_reps":  cfg.target_reps if cfg.test == "strength_3lift" else None,
+            "rest_s":       cfg.rest_s      if cfg.test == "strength_3lift" else None,
+            "warmup_set":   cfg.warmup_set  if cfg.test == "strength_3lift" else None,
+            # Per-set boundary records — list of dicts with set_idx,
+            # t_start_s (relative to record_start), t_end_s, warmup,
+            # load_kg, exercise. Empty list when not a multi-set test
+            # or when the session was cancelled before any set finished.
+            "sets":         self._sets if cfg.test == "strength_3lift" else None,
         }
 
     # ── misc helpers ────────────────────────────────────────────────────────

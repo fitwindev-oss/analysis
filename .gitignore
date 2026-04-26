@@ -57,6 +57,12 @@ _tmp_*/
 _tmp_patent/
 *.tmp
 
+# Disposable test helpers (e.g. tools/_test_*.py — one-off scripts
+# that create fixture rows for manual verification, not part of the
+# automated test suite under tests/).
+_test_*.py
+**/_test_*.py
+
 # Accidentally-created empty files from mistyped commands (pip / python
 # / version numbers as filenames). Re-listed explicitly so the initial
 # commit isn't polluted by "26.0.1" / "pip" / "python" zero-byte files.
