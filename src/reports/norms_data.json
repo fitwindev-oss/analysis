@@ -1,0 +1,111 @@
+{
+  "_meta": {
+    "version": 1,
+    "last_updated": "2026-04-22",
+    "sources": {
+      "balance_eo":   "Prieto 1996; Maki 2000; WHO SBT norms",
+      "balance_ec":   "Prieto 1996; Romberg ratio Pagnacco 2015",
+      "cmj":          "Claudino 2017 systematic review; Taylor 2010",
+      "romberg":      "Prieto 1996 — EC/EO ratio; clinical >1.5 alert"
+    },
+    "age_buckets": [
+      {"key": "adult_18_40",  "desc": "성인 18~40세"},
+      {"key": "adult_40_60",  "desc": "중년 40~60세"},
+      {"key": "senior_60p",   "desc": "고령 60세 이상"}
+    ],
+    "schema": {
+      "ok_range":       "[low, high] — the 'good / typical' band",
+      "caution_outside":"outside [ok_range] but within caution_range = amber",
+      "caution_range":  "[low, high] — wider band before red",
+      "lower_is_better":"if true, values below ok_range.low are still OK; above are worse",
+      "higher_is_better":"if true, values above ok_range.high are still OK; below are worse"
+    }
+  },
+
+  "balance_eo": {
+    "two": {
+      "mean_velocity_mm_s": {
+        "adult_18_40_M": {"ok_range":[8, 20],  "caution_range":[5, 35],  "lower_is_better": true},
+        "adult_18_40_F": {"ok_range":[8, 22],  "caution_range":[5, 38],  "lower_is_better": true},
+        "adult_40_60_any":{"ok_range":[10, 25],"caution_range":[7, 45],  "lower_is_better": true},
+        "senior_60p_any": {"ok_range":[15, 35],"caution_range":[10, 70], "lower_is_better": true},
+        "default":        {"ok_range":[8, 25], "caution_range":[5, 45],  "lower_is_better": true}
+      },
+      "ellipse95_area_mm2": {
+        "adult_18_40_any":{"ok_range":[50, 400],  "caution_range":[30, 900],  "lower_is_better": true},
+        "senior_60p_any": {"ok_range":[80, 700],  "caution_range":[50, 1500], "lower_is_better": true},
+        "default":        {"ok_range":[50, 500],  "caution_range":[30, 1000], "lower_is_better": true}
+      },
+      "path_length_mm": {
+        "default":        {"ok_range":[100, 700], "caution_range":[50, 1200], "lower_is_better": true}
+      },
+      "rms_ml_mm": {
+        "default":        {"ok_range":[1, 4],   "caution_range":[0.5, 7],   "lower_is_better": true}
+      },
+      "rms_ap_mm": {
+        "default":        {"ok_range":[1.5, 5], "caution_range":[0.8, 9],   "lower_is_better": true}
+      }
+    },
+    "left":  {
+      "mean_velocity_mm_s": {
+        "default": {"ok_range":[20, 60], "caution_range":[10, 100], "lower_is_better": true}
+      },
+      "ellipse95_area_mm2": {
+        "default": {"ok_range":[200, 1500], "caution_range":[100, 3000], "lower_is_better": true}
+      }
+    },
+    "right": {
+      "mean_velocity_mm_s": {
+        "default": {"ok_range":[20, 60], "caution_range":[10, 100], "lower_is_better": true}
+      },
+      "ellipse95_area_mm2": {
+        "default": {"ok_range":[200, 1500], "caution_range":[100, 3000], "lower_is_better": true}
+      }
+    }
+  },
+
+  "balance_ec": {
+    "two": {
+      "mean_velocity_mm_s": {
+        "adult_18_40_any":{"ok_range":[12, 35], "caution_range":[8, 60],   "lower_is_better": true},
+        "senior_60p_any": {"ok_range":[25, 65], "caution_range":[15, 130], "lower_is_better": true},
+        "default":        {"ok_range":[12, 40], "caution_range":[8, 80],   "lower_is_better": true}
+      },
+      "ellipse95_area_mm2": {
+        "default": {"ok_range":[100, 1000], "caution_range":[60, 2500], "lower_is_better": true}
+      }
+    }
+  },
+
+  "_romberg_ratio": {
+    "mean_velocity_mm_s": {
+      "default": {"ok_range":[1.0, 1.5], "caution_range":[0.9, 2.0], "lower_is_better": false}
+    }
+  },
+
+  "cmj": {
+    "_any": {
+      "jump_height_m_impulse": {
+        "adult_18_40_M":  {"ok_range":[0.35, 0.55], "caution_range":[0.25, 0.70], "higher_is_better": true},
+        "adult_18_40_F":  {"ok_range":[0.25, 0.45], "caution_range":[0.18, 0.60], "higher_is_better": true},
+        "adult_40_60_any":{"ok_range":[0.25, 0.45], "caution_range":[0.18, 0.60], "higher_is_better": true},
+        "senior_60p_any": {"ok_range":[0.15, 0.30], "caution_range":[0.10, 0.45], "higher_is_better": true},
+        "default":        {"ok_range":[0.25, 0.50], "caution_range":[0.15, 0.65], "higher_is_better": true}
+      },
+      "peak_force_bw": {
+        "default":        {"ok_range":[2.0, 2.8],  "caution_range":[1.6, 3.2], "higher_is_better": false}
+      },
+      "peak_rfd_n_s": {
+        "default":        {"ok_range":[8000, 25000], "caution_range":[5000, 35000], "higher_is_better": true}
+      },
+      "peak_power_w": {
+        "adult_18_40_M":  {"ok_range":[3000, 6000], "caution_range":[2000, 7500], "higher_is_better": true},
+        "adult_18_40_F":  {"ok_range":[2000, 4000], "caution_range":[1200, 5500], "higher_is_better": true},
+        "default":        {"ok_range":[2000, 5000], "caution_range":[1200, 6500], "higher_is_better": true}
+      },
+      "flight_time_s": {
+        "default":        {"ok_range":[0.45, 0.65], "caution_range":[0.35, 0.75], "higher_is_better": true}
+      }
+    }
+  }
+}

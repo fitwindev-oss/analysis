@@ -1,0 +1,28 @@
+# Core
+numpy>=1.26,<2.0
+scipy>=1.11
+opencv-contrib-python>=4.9
+PyQt6>=6.6
+pyqtgraph>=0.13
+PyOpenGL>=3.1
+pandas>=2.0
+
+# Hardware IO
+nidaqmx>=1.0
+nptdms>=1.9
+
+# Pose estimation — MediaPipe BlazePose (CPU-friendly, 33 landmarks)
+# Model complexity selectable at runtime: 0=Lite / 1=Full / 2=Heavy
+mediapipe>=0.10,<0.11
+
+# Reports / Excel
+openpyxl>=3.1             # multi-sheet xlsx export
+reportlab>=4.0            # PDF report generation
+matplotlib>=3.7           # plots in reports + app (was optional; now required)
+
+# Dev / logging
+rich>=13.0
+tqdm>=4.65
+
+# Packaging
+# pyinstaller>=6.0        # uncomment when building .exe

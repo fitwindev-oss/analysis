@@ -1,0 +1,556 @@
+"""
+Matplotlib chart generators — return PNG bytes for embedding in both
+HTML (base64 data-URI) and PDF (reportlab ``Image`` from BytesIO).
+
+Every plotting function:
+  - sets up Korean fonts on first call (fonts.setup_korean_fonts)
+  - renders onto a figure at ``dpi`` (default 150 = print-friendly)
+  - returns ``bytes`` (PNG)
+  - closes its figure to free memory (matters when 20+ charts per report)
+"""
+from __future__ import annotations
+
+import base64
+from io import BytesIO
+from typing import Iterable, Optional, Sequence
+
+import numpy as np
+
+from src.reports.fonts import setup_korean_fonts
+from src.reports.palette import (
+    ANGLE_COLORS, BOARD1_COLOR, BOARD2_COLOR, COORD_COLORS,
+    HISTORY_DOT, HISTORY_LINE, NORM_BAND_FILL, NORM_BAND_LINE,
+    STATUS_CAUTION, STATUS_OK, STATUS_WARNING, TOTAL_COLOR,
+)
+
+
+def _fig_to_png_bytes(fig, dpi: int = 220) -> bytes:
+    """Render a matplotlib figure to PNG bytes.
+
+    DPI default bumped to 220 (from 150) so the source PNG carries
+    ~2× pixel density. Qt's QTextBrowser scales embedded images down
+    to fit the current viewport width — at 150 DPI, narrow windows
+    cause Korean glyphs (already small in 8-10 pt legends) to alias
+    into unreadable boxes. With 220 DPI, the subsampling has enough
+    source detail to keep Hangul strokes crisp even when the viewer
+    is resized down.
+
+    Trade-off: ~2× base64 payload size. Still fine for embedded
+    reports (chart stays under ~200 KB per image).
+    """
+    import matplotlib.pyplot as plt
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def png_data_uri(png_bytes: bytes) -> str:
+    """Convert PNG bytes to a ``data:image/png;base64,...`` URI for HTML ``<img>``."""
+    return "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Common charts
+# ─────────────────────────────────────────────────────────────────────────────
+
+def make_history_trend(values: Sequence[float],
+                       dates: Sequence[str],
+                       metric_label: str,
+                       unit: str = "",
+                       norm_range: Optional[tuple[float, float]] = None,
+                       width_in: float = 7.5,
+                       height_in: float = 2.6) -> bytes:
+    """Line + dots chart of a metric across sessions, with optional
+    shaded normal-range band.
+
+    ``values`` and ``dates`` must align element-wise (oldest → newest).
+    ``norm_range`` = (low, high); draws a green band between them.
+    """
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(width_in, height_in),
+                           facecolor="white")
+    ax.set_facecolor("white")
+    x = np.arange(len(values))
+
+    if norm_range is not None and all(v is not None for v in norm_range):
+        lo, hi = float(norm_range[0]), float(norm_range[1])
+        ax.axhspan(lo, hi, color=NORM_BAND_FILL, alpha=0.7,
+                   label=f"정상 범위 ({lo:.0f}–{hi:.0f}{unit})")
+        ax.axhline(lo, color=NORM_BAND_LINE, linewidth=0.8, linestyle="--")
+        ax.axhline(hi, color=NORM_BAND_LINE, linewidth=0.8, linestyle="--")
+
+    # Filter out None values while preserving x positions
+    vs = [np.nan if v is None else float(v) for v in values]
+    ax.plot(x, vs, color=HISTORY_LINE, linewidth=2, marker="o",
+            markerfacecolor=HISTORY_DOT, markeredgecolor="white",
+            markersize=7, label=metric_label)
+
+    # Annotate latest value
+    if len(vs) > 0 and not np.isnan(vs[-1]):
+        ax.annotate(f"{vs[-1]:.1f}{unit}",
+                    xy=(x[-1], vs[-1]),
+                    xytext=(6, 6), textcoords="offset points",
+                    fontsize=10, fontweight="bold",
+                    color=HISTORY_DOT)
+
+    ax.set_title(f"{metric_label} 추이", fontsize=12, pad=10)
+    ax.set_ylabel(unit or "value")
+    ax.set_xticks(x)
+    ax.set_xticklabels(dates, rotation=30, ha="right", fontsize=9)
+    ax.grid(True, linestyle=":", alpha=0.4)
+    ax.legend(loc="best", fontsize=9, framealpha=0.9)
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
+def make_status_bar(label: str, value: float, unit: str,
+                    thresholds: Optional[tuple[float, float, float]] = None,
+                    width_in: float = 3.8, height_in: float = 0.7) -> bytes:
+    """Horizontal gauge: single value with ok/caution/warning bands.
+
+    ``thresholds`` = (ok_hi, caution_hi, max). Zones:
+        [0, ok_hi]          → green
+        (ok_hi, caution_hi] → amber
+        (caution_hi, max]   → red
+    """
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+    if thresholds is None:
+        hi = max(abs(value) * 1.4, 1.0)
+        thresholds = (hi * 0.6, hi * 0.8, hi)
+    ok, cau, mx = thresholds
+
+    ax.barh([0], [ok],       color=STATUS_OK,       edgecolor="none")
+    ax.barh([0], [cau - ok], left=[ok],  color=STATUS_CAUTION, edgecolor="none")
+    ax.barh([0], [mx - cau], left=[cau], color=STATUS_WARNING, edgecolor="none")
+    ax.axvline(value, color="black", linewidth=2.5)
+    ax.text(value, 0.4, f"{value:.2f}{unit}", ha="center", fontsize=10,
+            fontweight="bold")
+    ax.set_yticks([])
+    ax.set_xlim(0, mx)
+    ax.set_title(label, fontsize=10, loc="left")
+    ax.spines[["top", "right", "left"]].set_visible(False)
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Balance
+# ─────────────────────────────────────────────────────────────────────────────
+
+def make_stabilogram(cop_x: np.ndarray, cop_y: np.ndarray,
+                     plate_w_mm: float = 558.0, plate_h_mm: float = 432.0,
+                     board_w_mm: float = 279.0, board_h_mm: float = 432.0,
+                     board1_origin: tuple[float, float] = (0.0, 0.0),
+                     board2_origin: tuple[float, float] = (279.0, 0.0),
+                     width_in: float = 5.0,
+                     height_in: float = 4.0) -> bytes:
+    """2D CoP trajectory with plate outline + 95% ellipse + mean marker."""
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+    ax.set_facecolor("white")
+    # Plate outlines
+    for (x0, y0), color, label in [
+        (board1_origin, BOARD1_COLOR, "Board1"),
+        (board2_origin, BOARD2_COLOR, "Board2"),
+    ]:
+        rect = mpatches.Rectangle((x0, y0), board_w_mm, board_h_mm,
+                                   fill=False, edgecolor=color, linewidth=1.5)
+        ax.add_patch(rect)
+    # Valid CoP only
+    mask = (~np.isnan(cop_x)) & (~np.isnan(cop_y))
+    x = cop_x[mask]; y = cop_y[mask]
+    if len(x) > 3:
+        ax.plot(x, y, color="#CE93D8", linewidth=1.2, alpha=0.85,
+                label="CoP 경로")
+        # 95% confidence ellipse (Mahalanobis 2.447 for 2D 95%)
+        mx_, my_ = float(x.mean()), float(y.mean())
+        cov = np.cov(x, y)
+        w, v = np.linalg.eigh(cov)
+        order = w.argsort()[::-1]
+        w, v = w[order], v[:, order]
+        angle = np.degrees(np.arctan2(v[1, 0], v[0, 0]))
+        width_e  = 2 * 2.447 * np.sqrt(max(w[0], 1e-9))
+        height_e = 2 * 2.447 * np.sqrt(max(w[1], 1e-9))
+        ell = mpatches.Ellipse((mx_, my_), width_e, height_e, angle=angle,
+                                fill=False, edgecolor="#2E7D32", linewidth=2,
+                                linestyle="-", label="95% 타원")
+        ax.add_patch(ell)
+        ax.plot([mx_], [my_], marker="+", color="#2E7D32", markersize=14,
+                markeredgewidth=2.5, label="평균")
+    ax.set_xlim(-10, plate_w_mm + 10)
+    ax.set_ylim(-10, plate_h_mm + 10)
+    ax.set_aspect("equal")
+    ax.set_xlabel("X (mm, 좌 → 우)")
+    ax.set_ylabel("Y (mm, 후 → 전)")
+    ax.set_title("Stabilogram (CoP 경로)", fontsize=12)
+    ax.legend(loc="upper right", fontsize=10, framealpha=0.9)
+    ax.grid(True, linestyle=":", alpha=0.4)
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
+def make_cop_timeseries(t: np.ndarray, cop_x: np.ndarray, cop_y: np.ndarray,
+                        analysis_window: Optional[tuple[float, float]] = None,
+                        width_in: float = 7.5,
+                        height_in: float = 3.2) -> bytes:
+    """Two stacked subplots: CoP ML (X) and AP (Y) vs time."""
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(width_in, height_in), sharex=True, facecolor="white")
+    for ax, y, label, color in [
+        (ax1, cop_x, "ML (좌우, mm)", BOARD1_COLOR),
+        (ax2, cop_y, "AP (전후, mm)", BOARD2_COLOR),
+    ]:
+        ax.set_facecolor("white")
+        mask = ~np.isnan(y)
+        ax.plot(t[mask], y[mask], color=color, linewidth=1.2)
+        ax.set_ylabel(label, fontsize=10)
+        ax.grid(True, linestyle=":", alpha=0.4)
+        if analysis_window is not None:
+            ax.axvspan(*analysis_window, alpha=0.1, color=TOTAL_COLOR,
+                        label="분석 구간" if ax is ax1 else None)
+        if mask.any():
+            mean_y = float(y[mask].mean())
+            ax.axhline(mean_y, color="#888", linewidth=0.6, linestyle="--")
+    ax2.set_xlabel("시간 (s)")
+    ax1.set_title("CoP 시계열 (ML · AP)", fontsize=12)
+    if analysis_window is not None:
+        ax1.legend(loc="upper right", fontsize=10)
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CMJ
+# ─────────────────────────────────────────────────────────────────────────────
+
+def make_cmj_force_time(t: np.ndarray, vgrf: np.ndarray,
+                        bw_n: Optional[float] = None,
+                        takeoff_t: Optional[float] = None,
+                        landing_t: Optional[float] = None,
+                        peak_t: Optional[float] = None,
+                        width_in: float = 7.5,
+                        height_in: float = 3.2) -> bytes:
+    """CMJ vGRF over time with BW line, takeoff/landing markers, peak."""
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+    ax.set_facecolor("white")
+    ax.plot(t, vgrf, color=TOTAL_COLOR, linewidth=1.4, label="vGRF")
+    if bw_n is not None:
+        ax.axhline(bw_n, color="#888", linewidth=0.8, linestyle="--",
+                    label=f"BW ({bw_n:.0f} N)")
+    # Takeoff / landing markers
+    if takeoff_t is not None:
+        ax.axvline(takeoff_t, color=STATUS_OK, linewidth=1.5,
+                    linestyle="-.", label="Takeoff")
+    if landing_t is not None:
+        ax.axvline(landing_t, color=STATUS_WARNING, linewidth=1.5,
+                    linestyle="-.", label="Landing")
+    if peak_t is not None:
+        peak_idx = int(np.argmin(np.abs(t - peak_t)))
+        ax.plot([peak_t], [vgrf[peak_idx]], marker="*",
+                color="#B71C1C", markersize=14, label="Peak Force")
+    # Flight phase shading
+    if takeoff_t is not None and landing_t is not None:
+        ax.axvspan(takeoff_t, landing_t, alpha=0.12, color=STATUS_OK,
+                    label="체공")
+    ax.set_xlabel("시간 (s)")
+    ax.set_ylabel("vGRF (N)")
+    ax.set_title("CMJ 힘-시간 곡선", fontsize=12)
+    ax.grid(True, linestyle=":", alpha=0.4)
+    ax.legend(loc="best", fontsize=10, ncol=2)
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Squat precision (Phase S1d) — patent 2 §4
+# ─────────────────────────────────────────────────────────────────────────────
+
+def make_squat_cop_overlay(t_arr: np.ndarray,
+                           cop_x: np.ndarray, cop_y: np.ndarray,
+                           reps: list[dict],
+                           width_in: float = 5.0,
+                           height_in: float = 4.0) -> bytes:
+    """Overlay all reps' CoP trails (centred per-rep on foot midpoint)
+    with the mean trajectory highlighted. Helps visualise consistency
+    — tight cluster = high CMC, scattered = low CMC.
+
+    X axis = ML deviation (mm), Y = AP deviation (mm). Zero = rep-mean
+    foot center.
+    """
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+    ax.set_facecolor("white")
+
+    all_x = []
+    all_y = []
+    for rep in reps:
+        ts = rep.get("t_start_s")
+        te = rep.get("t_end_s")
+        if ts is None or te is None:
+            continue
+        i_s = int(np.searchsorted(t_arr, ts))
+        i_e = int(np.searchsorted(t_arr, te))
+        if i_e <= i_s + 2:
+            continue
+        xs = cop_x[i_s:i_e + 1]
+        ys = cop_y[i_s:i_e + 1]
+        mask = (~np.isnan(xs)) & (~np.isnan(ys))
+        if mask.sum() < 3:
+            continue
+        xv = xs[mask] - xs[mask].mean()
+        yv = ys[mask] - ys[mask].mean()
+        ax.plot(xv, yv, alpha=0.35, linewidth=1.0, color="#1565C0")
+        all_x.append(xv)
+        all_y.append(yv)
+
+    # Mean trajectory (resample each to common length, average)
+    if len(all_x) >= 2:
+        N = 101
+        x_stack = np.stack([np.interp(
+            np.linspace(0, 1, N),
+            np.linspace(0, 1, len(xv)), xv) for xv in all_x])
+        y_stack = np.stack([np.interp(
+            np.linspace(0, 1, N),
+            np.linspace(0, 1, len(yv)), yv) for yv in all_y])
+        ax.plot(x_stack.mean(0), y_stack.mean(0),
+                color="#D32F2F", linewidth=2.2,
+                label=f"평균 경로 ({len(all_x)} rep)")
+        ax.legend(loc="best", fontsize=10, framealpha=0.9)
+
+    ax.axhline(0, color="#BBB", linewidth=0.5)
+    ax.axvline(0, color="#BBB", linewidth=0.5)
+    ax.set_xlabel("ML 편차 (mm)")
+    ax.set_ylabel("AP 편차 (mm)")
+    ax.set_title("CoP 궤적 일관성 (발 중앙 기준)", fontsize=12)
+    ax.grid(True, linestyle=":", alpha=0.4)
+    ax.set_aspect("equal", adjustable="datalim")
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
+def make_rfd_intervals_bar(rfd_per_rep: list[dict],
+                            width_in: float = 6.0,
+                            height_in: float = 3.0) -> bytes:
+    """Bar chart of mean RFD across reps at 20/40/60/80/100 ms from
+    concentric force onset. Each bar labeled with N/s magnitude.
+    """
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+    ax.set_facecolor("white")
+
+    intervals = [20, 40, 60, 80, 100]
+    means: list[float] = []
+    for ms in intervals:
+        vals: list[float] = []
+        for r in rfd_per_rep:
+            v = (r or {}).get(str(ms)) or (r or {}).get(ms)
+            if isinstance(v, (int, float)):
+                vals.append(float(v))
+        means.append(float(np.mean(vals)) if vals else 0.0)
+
+    bars = ax.bar([f"0-{ms}" for ms in intervals], means,
+                   color="#5F8A00", edgecolor="white", linewidth=1.2)
+    for bar, v in zip(bars, means):
+        ax.text(bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + max(means) * 0.02 if means else 0,
+                f"{v:.0f}", ha="center", va="bottom", fontsize=9)
+    ax.set_ylabel("RFD (N/s)")
+    ax.set_xlabel("힘 발현 onset 이후 구간 (ms)")
+    ax.set_title("구간별 힘 생성 속도 (RFD)", fontsize=12)
+    ax.grid(True, axis="y", linestyle=":", alpha=0.4)
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Squat / Encoder — rep bars + rep markers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def make_force_time_with_reps(t: np.ndarray, vgrf: np.ndarray,
+                              reps: list[dict],
+                              bw_n: Optional[float] = None,
+                              width_in: float = 7.5,
+                              height_in: float = 2.8) -> bytes:
+    """vGRF over time with vertical markers at each rep's start/bottom/end."""
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+    ax.set_facecolor("white")
+    ax.plot(t, vgrf, color=TOTAL_COLOR, linewidth=1.2, label="vGRF")
+    if bw_n is not None:
+        ax.axhline(bw_n, color="#888", linewidth=0.8, linestyle="--",
+                    label=f"BW ({bw_n:.0f} N)")
+    for i, rep in enumerate(reps):
+        ts = rep.get("t_start_s");  tb = rep.get("t_bottom_s")
+        te = rep.get("t_end_s")
+        if ts is not None and te is not None:
+            ax.axvspan(ts, te, alpha=0.08, color=STATUS_OK)
+            ax.axvline(ts, color=STATUS_OK,  linewidth=0.8, linestyle=":")
+            if tb is not None:
+                ax.axvline(tb, color=STATUS_WARNING, linewidth=0.8,
+                            linestyle=":")
+            ax.axvline(te, color=STATUS_OK,  linewidth=0.8, linestyle=":")
+            if te > ts:
+                ax.text((ts + te) / 2, ax.get_ylim()[1] * 0.92,
+                        f"#{i+1}", ha="center", fontsize=8, color="#555")
+    ax.set_xlabel("시간 (s)")
+    ax.set_ylabel("vGRF (N)")
+    ax.set_title(f"반복 {len(reps)} 회 힘-시간", fontsize=12)
+    ax.grid(True, linestyle=":", alpha=0.4)
+    ax.legend(loc="upper right", fontsize=10)
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
+def make_rep_metric_bars(values: list[Optional[float]],
+                         metric_label: str, unit: str = "",
+                         colors: Optional[list[str]] = None,
+                         width_in: float = 7.5,
+                         height_in: float = 2.4) -> bytes:
+    """Per-rep metric bars (one bar per rep). Missing values shown as gray."""
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+    ax.set_facecolor("white")
+    x = np.arange(1, len(values) + 1)
+    y = np.array([np.nan if v is None else float(v) for v in values])
+    cols = colors if colors is not None \
+        else [TOTAL_COLOR if not np.isnan(v) else "#BDBDBD" for v in y]
+    bars = ax.bar(x, np.nan_to_num(y, nan=0.0), color=cols, edgecolor="white")
+    for xi, vi in zip(x, y):
+        if not np.isnan(vi):
+            ax.text(xi, vi, f"{vi:.1f}",
+                    ha="center", va="bottom", fontsize=8)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"#{i}" for i in x])
+    ax.set_ylabel(f"{metric_label}{' (' + unit + ')' if unit else ''}")
+    ax.set_title(f"반복별 {metric_label}", fontsize=12)
+    ax.grid(True, axis="y", linestyle=":", alpha=0.4)
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
+# VBT zone colors (strength → speed)
+VBT_ZONES = [
+    (0.00, 0.45, "#E53935", "Max Strength"),   # red
+    (0.45, 0.75, "#FB8C00", "Strength-Speed"),  # orange
+    (0.75, 1.00, "#FDD835", "Power"),           # yellow
+    (1.00, 1.30, "#43A047", "Speed-Strength"),  # green
+    (1.30, 3.00, "#1E88E5", "Speed"),           # blue
+]
+
+
+def _zone_color(mcv: Optional[float]) -> str:
+    if mcv is None or np.isnan(mcv):
+        return "#BDBDBD"
+    for lo, hi, c, _ in VBT_ZONES:
+        if lo <= mcv < hi:
+            return c
+    return "#BDBDBD"
+
+
+def make_vbt_velocity_bars(mcv_values: list[Optional[float]],
+                           width_in: float = 7.5,
+                           height_in: float = 2.8) -> bytes:
+    """Per-rep velocity bars, colored by VBT zone."""
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+    ax.set_facecolor("white")
+    x = np.arange(1, len(mcv_values) + 1)
+    y = np.array([np.nan if v is None else float(v) for v in mcv_values])
+    cols = [_zone_color(v) for v in y]
+    ax.bar(x, np.nan_to_num(y, nan=0.0), color=cols, edgecolor="white")
+    for xi, vi in zip(x, y):
+        if not np.isnan(vi):
+            ax.text(xi, vi, f"{vi:.2f}",
+                    ha="center", va="bottom", fontsize=8)
+    # Zone lines
+    for lo, hi, c, label in VBT_ZONES[:-1]:
+        ax.axhline(hi, color=c, linewidth=0.6, linestyle="--", alpha=0.6)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"#{i}" for i in x])
+    ax.set_ylabel("MCV (m/s)")
+    ax.set_title("반복별 평균 concentric velocity (VBT zone 색상)", fontsize=12)
+    ax.grid(True, axis="y", linestyle=":", alpha=0.4)
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reaction
+# ─────────────────────────────────────────────────────────────────────────────
+
+def make_rt_histogram(rt_values_ms: list[float],
+                      width_in: float = 6.5,
+                      height_in: float = 2.6) -> bytes:
+    """Distribution of reaction times, mean ± SD line."""
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+    ax.set_facecolor("white")
+    arr = np.array([r for r in rt_values_ms
+                    if r is not None and not np.isnan(r)], dtype=float)
+    if len(arr) > 0:
+        n_bins = max(4, min(20, int(len(arr) ** 0.7)))
+        ax.hist(arr, bins=n_bins, color=TOTAL_COLOR, edgecolor="white")
+        mu = float(arr.mean()); sd = float(arr.std())
+        ax.axvline(mu, color="#2E7D32", linewidth=2,
+                    label=f"평균 {mu:.0f} ms")
+        ax.axvspan(mu - sd, mu + sd, alpha=0.15, color="#2E7D32",
+                    label=f"±1 SD ({sd:.0f} ms)")
+    ax.set_xlabel("RT (ms)")
+    ax.set_ylabel("trials")
+    ax.set_title("반응 시간 분포", fontsize=12)
+    ax.grid(True, linestyle=":", alpha=0.4)
+    ax.legend(loc="upper right", fontsize=10)
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Proprio
+# ─────────────────────────────────────────────────────────────────────────────
+
+def make_proprio_scatter(trials: list[dict],
+                         width_in: float = 5.0,
+                         height_in: float = 4.8) -> bytes:
+    """Target-vs-reproduction scatter in mm, with error vectors."""
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+    ax.set_facecolor("white")
+    for t in trials:
+        tgt = t.get("target_xy_mm");    rep = t.get("reproduction_xy_mm")
+        if not tgt or not rep:
+            continue
+        tx, ty = float(tgt[0]), float(tgt[1])
+        rx, ry = float(rep[0]), float(rep[1])
+        ax.annotate("", xy=(rx, ry), xytext=(tx, ty),
+                     arrowprops=dict(arrowstyle="->", color="#888",
+                                     lw=0.8, alpha=0.7))
+        ax.plot([tx], [ty], marker="x", color="#1976D2", markersize=10,
+                 markeredgewidth=2)
+        ax.plot([rx], [ry], marker="o", color="#E53935", markersize=8,
+                 markerfacecolor="#E53935", alpha=0.85)
+    ax.set_aspect("equal")
+    ax.set_xlabel("X (mm)")
+    ax.set_ylabel("Y (mm)")
+    ax.set_title("목표 (×) vs 재현 (●) — 오차 벡터", fontsize=12)
+    ax.grid(True, linestyle=":", alpha=0.4)
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
