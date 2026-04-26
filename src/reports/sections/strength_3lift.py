@@ -21,7 +21,9 @@ from typing import Optional
 
 from src.reports.base import ReportContext, ReportSection
 from src.reports.charts import (
-    make_strength_grade_band, make_strength_per_set_bars, png_data_uri,
+    make_strength_grade_band, make_strength_per_set_bars,
+    make_recovery_set_bars, make_fiber_tendency_slider,
+    png_data_uri,
 )
 from src.reports.fonts import pdf_font_family
 
@@ -50,6 +52,15 @@ _RELIABILITY_KO: dict[str, str] = {
     "medium":     "보통",
     "low":        "낮음",
     "unreliable": "신뢰 불가",
+}
+
+# V2 — recovery grade colors (1-5 scale)
+_RECOVERY_GRADE_COLORS: dict[int, str] = {
+    1: "#26A69A",
+    2: "#9CCC65",
+    3: "#FBC02D",
+    4: "#FFA726",
+    5: "#EF5350",
 }
 
 
@@ -83,6 +94,10 @@ class Strength3LiftSection(ReportSection):
         warning = result.get("warning")
         thresholds = result.get("thresholds_kg")
         skipped = result.get("skipped_grade_reason")
+        # V1.5 — bodyweight contribution flag + factor (used in both
+        # per-set table and subject-context block).
+        use_bw = bool(result.get("use_bodyweight_load", False))
+        bw_factor = float(result.get("bw_factor") or 0.0)
 
         badge_color = _GRADE_COLORS.get(grade or 0, "#9E9E9E")
         warn_html = ""
@@ -183,9 +198,8 @@ class Strength3LiftSection(ReportSection):
         sex_ko = {"M": "남성", "F": "여성"}.get(result.get("sex"), "—")
         age = result.get("age")
         bw = result.get("bw_kg")
-        # V1.5 — bodyweight contribution notation
-        use_bw = bool(result.get("use_bodyweight_load", False))
-        bw_factor = float(result.get("bw_factor") or 0.0)
+        # V1.5 — bodyweight contribution notation (use_bw / bw_factor
+        # already pulled above near the top of to_html)
         bw_note = ""
         if use_bw:
             bw_note = (
@@ -239,6 +253,113 @@ class Strength3LiftSection(ReportSection):
           </thead>
           <tbody>{rows_html}</tbody>
         </table>
+        {self._html_recovery_block(result)}
+        """
+
+    # ── V2: ATP-PCr recovery subsection (HTML) ──────────────────────────
+    def _html_recovery_block(self, result: dict) -> str:
+        """Render the ATP-PCr recovery subsection (FI / PDS / fiber slider).
+
+        Phase V2. Returns an empty string when recovery metrics were
+        skipped (fewer than 2 working sets, or no usable encoder data).
+        """
+        rec = result.get("recovery") or {}
+        if rec.get("skipped_reason"):
+            return ""
+        fi_pct  = rec.get("fi_pct")
+        pds_pct = rec.get("pds_pct")
+        if fi_pct is None or pds_pct is None:
+            return ""
+
+        fi_grade  = int(rec.get("fi_grade") or 5)
+        pds_grade = int(rec.get("pds_grade") or 5)
+        fi_color  = _RECOVERY_GRADE_COLORS.get(fi_grade, "#9E9E9E")
+        pds_color = _RECOVERY_GRADE_COLORS.get(pds_grade, "#9E9E9E")
+
+        # Per-set bar chart of the primary variable (mean power).
+        try:
+            bar_png = make_recovery_set_bars(
+                rec.get("set_indices", []),
+                rec.get("set_values", []),
+                variable_label="평균 컨센트릭 파워 (W)",
+                fi_pct=float(fi_pct), pds_pct=float(pds_pct))
+            bar_html = (
+                f"<img src='{png_data_uri(bar_png)}' "
+                f"style='max-width:100%; height:auto; margin:8px 0;' />")
+        except Exception:
+            bar_html = ""
+
+        try:
+            slider_png = make_fiber_tendency_slider(
+                float(rec.get("fiber_tendency") or 0.0),
+                rec.get("fiber_label", ""))
+            slider_html = (
+                f"<img src='{png_data_uri(slider_png)}' "
+                f"style='max-width:100%; height:auto; margin:4px 0;' />")
+        except Exception:
+            slider_html = ""
+
+        # Negative FI/PDS notice (subject improved between sets) —
+        # informative caveat so operators don't read "grade 1" as
+        # "perfect recovery" when really set 1 was just submaximal.
+        negative_note = ""
+        if (isinstance(fi_pct, (int, float)) and fi_pct < 0) or \
+           (isinstance(pds_pct, (int, float)) and pds_pct < 0):
+            negative_note = (
+                "<div style='background:#E3F2FD; color:#0D47A1; "
+                "padding:6px 10px; margin-top:6px; border-radius:4px; "
+                "font-size:11px;'>"
+                "ℹ 후속 세트 수행이 첫 세트보다 오히려 향상되었습니다. "
+                "1세트가 페이싱되거나 워밍업 효과로 늦게 절정에 도달한 패턴일 "
+                "가능성이 있어, 등급은 \"기복 거의 없음\"으로 해석됩니다."
+                "</div>"
+            )
+
+        return f"""
+        <h2 style='margin-top:24px;'>ATP-PCr 회복 탄력성</h2>
+        <div style='font-size:11px; color:#666; margin-bottom:8px;'>
+          세트 간 30초 휴식을 기준으로, 작업 세트 ({rec.get('n_working_sets', 0)}개)
+          간 평균 컨센트릭 파워 변화로 PCr 재합성 효율과
+          신경근 피로 회복력을 평가합니다.
+        </div>
+        <div style='display:flex; gap:12px; flex-wrap:wrap;
+                     margin-bottom:8px;'>
+          <div style='flex:1; min-width:280px; padding:10px;
+                       background:{fi_color}22;
+                       border-left:4px solid {fi_color}; border-radius:4px;'>
+            <div style='font-size:11px; color:#555;'>
+              피로지수 (FI) — 첫-마지막 세트 차이
+            </div>
+            <div style='font-size:24px; font-weight:bold; color:{fi_color};'>
+              {fi_pct:.1f}%
+              <span style='font-size:14px; color:#212121;'>
+                · {fi_grade}등급 {rec.get('fi_label', '')}
+              </span>
+            </div>
+            <div style='font-size:11px; color:#666; margin-top:4px;'>
+              {rec.get('fi_interpretation') or ''}
+            </div>
+          </div>
+          <div style='flex:1; min-width:280px; padding:10px;
+                       background:{pds_color}22;
+                       border-left:4px solid {pds_color}; border-radius:4px;'>
+            <div style='font-size:11px; color:#555;'>
+              수행감소지수 (PDS) — 전체 세트 누적
+            </div>
+            <div style='font-size:24px; font-weight:bold; color:{pds_color};'>
+              {pds_pct:.1f}%
+              <span style='font-size:14px; color:#212121;'>
+                · {pds_grade}등급 {rec.get('pds_label', '')}
+              </span>
+            </div>
+            <div style='font-size:11px; color:#666; margin-top:4px;'>
+              {rec.get('pds_interpretation') or ''}
+            </div>
+          </div>
+        </div>
+        {bar_html}
+        {slider_html}
+        {negative_note}
         """
 
     # ── PDF ─────────────────────────────────────────────────────────────
@@ -424,4 +545,122 @@ class Strength3LiftSection(ReportSection):
             ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ]))
         flow.append(tbl)
+
+        # ── V2: ATP-PCr recovery (PDF flowables) ────────────────────────
+        flow.extend(self._pdf_recovery_block(result, family))
+        return flow
+
+    # ── V2 PDF helper ───────────────────────────────────────────────────
+    def _pdf_recovery_block(self, result: dict, family: str) -> list:
+        """Build the recovery subsection for the PDF (mirrors HTML)."""
+        rec = result.get("recovery") or {}
+        if rec.get("skipped_reason"):
+            return []
+        fi_pct  = rec.get("fi_pct")
+        pds_pct = rec.get("pds_pct")
+        if fi_pct is None or pds_pct is None:
+            return []
+
+        from reportlab.platypus import (
+            Image, Paragraph, Spacer, Table, TableStyle,
+        )
+        from reportlab.lib.styles import ParagraphStyle
+        from reportlab.lib.colors import HexColor
+        from reportlab.lib.units import mm
+
+        fi_grade = int(rec.get("fi_grade") or 5)
+        pds_grade = int(rec.get("pds_grade") or 5)
+        fi_color = _RECOVERY_GRADE_COLORS.get(fi_grade, "#9E9E9E")
+        pds_color = _RECOVERY_GRADE_COLORS.get(pds_grade, "#9E9E9E")
+
+        h2 = ParagraphStyle(
+            "rec_h2", fontName=family, fontSize=13,
+            textColor=HexColor("#1976D2"), spaceBefore=14, spaceAfter=8)
+        ctx_style = ParagraphStyle(
+            "rec_ctx", fontName=family, fontSize=9,
+            textColor=HexColor("#666666"), leading=12)
+
+        flow: list = [
+            Paragraph("ATP-PCr 회복 탄력성", h2),
+            Paragraph(
+                f"세트 간 30초 휴식 기준, 작업 세트 ({rec.get('n_working_sets', 0)}개)의 "
+                f"평균 컨센트릭 파워 변화로 PCr 재합성 효율과 신경근 피로 "
+                f"회복력을 평가합니다.",
+                ctx_style),
+            Spacer(1, 6),
+        ]
+
+        # FI / PDS card row
+        fi_para = Paragraph(
+            f"<para alignment='left'>"
+            f"<font size='9' color='#555'>피로지수 (FI) — 첫-마지막 세트</font><br/>"
+            f"<font size='18' color='{fi_color}'><b>{fi_pct:.1f}%</b></font>"
+            f"<font size='10' color='#212121'> · {fi_grade}등급 "
+            f"{rec.get('fi_label', '')}</font><br/>"
+            f"<font size='8' color='#666'>{rec.get('fi_interpretation') or ''}</font>"
+            f"</para>",
+            ParagraphStyle("rec_fi", fontName=family, fontSize=10,
+                           leading=13))
+        pds_para = Paragraph(
+            f"<para alignment='left'>"
+            f"<font size='9' color='#555'>수행감소지수 (PDS) — 전체 누적</font><br/>"
+            f"<font size='18' color='{pds_color}'><b>{pds_pct:.1f}%</b></font>"
+            f"<font size='10' color='#212121'> · {pds_grade}등급 "
+            f"{rec.get('pds_label', '')}</font><br/>"
+            f"<font size='8' color='#666'>{rec.get('pds_interpretation') or ''}</font>"
+            f"</para>",
+            ParagraphStyle("rec_pds", fontName=family, fontSize=10,
+                           leading=13))
+        card_table = Table([[fi_para, pds_para]],
+                            colWidths=[85 * mm, 85 * mm])
+        card_table.setStyle(TableStyle([
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+            ("BACKGROUND",    (0, 0), (0, 0), HexColor(fi_color + "22")),
+            ("BACKGROUND",    (1, 0), (1, 0), HexColor(pds_color + "22")),
+            ("LINEBEFORE",    (0, 0), (0, 0), 3, HexColor(fi_color)),
+            ("LINEBEFORE",    (1, 0), (1, 0), 3, HexColor(pds_color)),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING",  (0, 0), (-1, -1), 8),
+            ("TOPPADDING",    (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        flow.append(card_table)
+        flow.append(Spacer(1, 6))
+
+        # Per-set bar chart
+        try:
+            bar_png = make_recovery_set_bars(
+                rec.get("set_indices", []),
+                rec.get("set_values", []),
+                variable_label="평균 파워 (W)",
+                fi_pct=float(fi_pct), pds_pct=float(pds_pct))
+            flow.append(Image(BytesIO(bar_png),
+                              width=170 * mm, height=54 * mm))
+            flow.append(Spacer(1, 4))
+        except Exception:
+            pass
+
+        # Endurance ↔ Power slider
+        try:
+            slider_png = make_fiber_tendency_slider(
+                float(rec.get("fiber_tendency") or 0.0),
+                rec.get("fiber_label", ""))
+            flow.append(Image(BytesIO(slider_png),
+                              width=150 * mm, height=32 * mm))
+        except Exception:
+            pass
+
+        # Negative-FI/PDS notice
+        if (isinstance(fi_pct, (int, float)) and fi_pct < 0) or \
+           (isinstance(pds_pct, (int, float)) and pds_pct < 0):
+            flow.append(Spacer(1, 4))
+            flow.append(Paragraph(
+                "ℹ 후속 세트 수행이 첫 세트보다 향상되었습니다. "
+                "1세트가 페이싱되거나 워밍업 효과로 늦게 절정에 도달한 패턴일 "
+                "가능성이 있어, 등급은 “기복 거의 없음”으로 해석됩니다.",
+                ParagraphStyle(
+                    "rec_neg", fontName=family, fontSize=9,
+                    textColor=HexColor("#0D47A1"),
+                    backColor=HexColor("#E3F2FD"),
+                    borderPadding=4, leading=12)))
         return flow

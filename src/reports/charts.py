@@ -670,6 +670,139 @@ def make_strength_grade_band(thresholds_kg: dict, one_rm_kg: float,
     return _fig_to_png_bytes(fig)
 
 
+def make_recovery_set_bars(set_indices: list[int],
+                            set_values: list[float],
+                            variable_label: str = "평균 파워 (W)",
+                            fi_pct: Optional[float] = None,
+                            pds_pct: Optional[float] = None,
+                            width_in: float = 7.5,
+                            height_in: float = 2.4) -> bytes:
+    """Per-set bar chart of the recovery primary variable (mean power).
+
+    Used by the V2 ATP-PCr recovery subsection. Annotates each bar with
+    its value and overlays FI/PDS reference text in the corner.
+    """
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+
+    n = len(set_values)
+    if n == 0:
+        fig, ax = plt.subplots(figsize=(width_in, height_in),
+                               facecolor="white")
+        ax.text(0.5, 0.5, "회복 지표 데이터 없음", ha="center", va="center",
+                fontsize=14, color="#999")
+        ax.set_xticks([]); ax.set_yticks([])
+        return _fig_to_png_bytes(fig)
+
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+    xs = list(range(1, n + 1))
+    # Gradient: first set bright (best), tail bars muted.
+    bar_colors = []
+    for i, v in enumerate(set_values):
+        # Per-bar tint relative to set 1
+        if i == 0:
+            bar_colors.append("#1976D2")
+        else:
+            ratio = (v / set_values[0]) if set_values[0] > 0 else 0
+            ratio = max(0.0, min(1.0, ratio))
+            # Blue at 1.0 → orange at 0.0
+            bar_colors.append(
+                "#1976D2" if ratio >= 0.85
+                else "#42A5F5" if ratio >= 0.70
+                else "#FFB74D" if ratio >= 0.55
+                else "#EF5350"
+            )
+
+    bars = ax.bar(xs, set_values, color=bar_colors, edgecolor="white",
+                  linewidth=1.2)
+    for x, v in zip(xs, set_values):
+        ax.text(x, v + max(set_values) * 0.02, f"{v:.0f}",
+                ha="center", va="bottom", fontsize=10, color="#212121",
+                fontweight="bold")
+    ax.set_xticks(xs)
+    ax.set_xticklabels([f"세트 {i + 1}" for i in set_indices],
+                       fontsize=9)
+    ax.set_ylabel(variable_label, fontsize=10)
+    title = "세트별 수행 변화"
+    if fi_pct is not None and pds_pct is not None:
+        title += f"   (FI = {fi_pct:.1f}%, PDS = {pds_pct:.1f}%)"
+    ax.set_title(title, fontsize=11, loc="left", color="#1976D2")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(True, axis="y", linestyle=":", alpha=0.4)
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
+def make_fiber_tendency_slider(tendency: float,
+                                label_ko: str = "",
+                                width_in: float = 6.5,
+                                height_in: float = 1.4) -> bytes:
+    """Endurance ↔ Power tendency horizontal slider (V2).
+
+    ``tendency`` ∈ [-1, +1]:
+        -1 = pure endurance (Type 1 / 지근 dominant)
+         0 = balanced
+        +1 = pure power     (Type 2 / 속근 dominant)
+    """
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+
+    t = max(-1.0, min(1.0, float(tendency)))
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+
+    # Gradient bar — green (endurance) → grey (mid) → orange (power).
+    n_seg = 100
+    x = np.linspace(-1, 1, n_seg)
+    for i in range(n_seg - 1):
+        v = (x[i] + x[i + 1]) / 2
+        # Color interpolation
+        if v < 0:
+            # Green to grey
+            r = 0.55 + 0.31 * (-v)
+            g = 0.78 + 0.07 * (1 + v)
+            b = 0.40 + 0.40 * (-v)
+        else:
+            # Grey to orange
+            r = 0.86 + 0.14 * v
+            g = 0.85 - 0.18 * v
+            b = 0.80 - 0.65 * v
+        ax.fill_betweenx([0, 1], x[i], x[i + 1],
+                          color=(r, g, b), edgecolor="none")
+
+    # Marker
+    ax.axvline(t, color="#212121", linewidth=2.5, ymin=0.0, ymax=1.0)
+    badge_color = ("#26A69A" if t < -0.3 else
+                   "#FFA726" if t > 0.3 else "#9E9E9E")
+    ax.scatter([t], [0.5], s=240, marker="o",
+               color=badge_color, edgecolor="black", linewidth=1.5,
+               zorder=5)
+
+    if label_ko:
+        ax.text(t, 1.25, label_ko,
+                ha="center", va="bottom",
+                fontsize=11, fontweight="bold", color="#212121",
+                bbox=dict(boxstyle="round,pad=0.3",
+                          facecolor="white", edgecolor=badge_color,
+                          linewidth=1.5))
+
+    ax.text(-1.0, -0.35, "지구력\n(Type 1)", ha="left", va="top",
+            fontsize=9, color="#26A69A", fontweight="bold")
+    ax.text(0, -0.35, "균형형", ha="center", va="top",
+            fontsize=9, color="#666666")
+    ax.text(1.0, -0.35, "파워\n(Type 2)", ha="right", va="top",
+            fontsize=9, color="#FFA726", fontweight="bold")
+
+    ax.set_xlim(-1.1, 1.1)
+    ax.set_ylim(-1.0, 1.7)
+    ax.set_yticks([])
+    ax.set_xticks([])
+    ax.spines[:].set_visible(False)
+    ax.set_title("근섬유 성향 (PDS 기반 추정)",
+                 fontsize=10, loc="left", color="#1976D2")
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
 def make_strength_per_set_bars(per_set: list[dict],
                                 width_in: float = 7.5,
                                 height_in: float = 2.5) -> bytes:

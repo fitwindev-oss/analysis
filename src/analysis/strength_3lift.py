@@ -35,11 +35,16 @@ from typing import Optional
 import numpy as np
 
 from src.analysis.common import ForceSession, load_force_session
-from src.analysis.encoder import RepMetrics, detect_reps
+from src.analysis.encoder import (
+    RepMetrics, detect_reps, butter_lowpass, numerical_derivative,
+)
 from src.analysis.one_rm import estimate_1rm, estimate_1rm_from_sets
 from src.analysis.strength_norms import (
     grade_1rm, EXERCISE_REGION, GRADE_LABELS, VALID_EXERCISES,
     EXERCISE_BW_FACTOR, effective_load_kg,
+)
+from src.analysis.multiset_recovery import (
+    SetPerformance, RecoveryMetrics, compute_recovery_metrics,
 )
 
 
@@ -101,6 +106,13 @@ class StrengthResult:
     # input came from bodyweight; report should warn that this is a
     # back-calculation rather than a measured lift.
 
+    # ── ATP-PCr recovery (V2) ───────────────────────────────────────────
+    # Per-set performance + FI / PDS / fiber-tendency. None when fewer
+    # than 2 working sets had usable encoder data — the recovery
+    # subsection of the report degrades gracefully in that case.
+    set_perfs: list = field(default_factory=list)   # list[SetPerformance]
+    recovery:  Optional[dict] = None                # RecoveryMetrics.to_dict()
+
     # 1RM aggregate
     best_1rm_kg:    float = float("nan")
     best_set_idx:   Optional[int] = None    # which set produced the best estimate
@@ -120,6 +132,13 @@ class StrengthResult:
     def to_dict(self) -> dict:
         d = asdict(self)
         d["sets"] = [s.to_dict() if hasattr(s, "to_dict") else s for s in self.sets]
+        # V2 — set_perfs is a list[SetPerformance]; asdict already
+        # walks dataclass fields, but emit explicitly for clarity so
+        # downstream consumers know this is a list of plain dicts.
+        d["set_perfs"] = [
+            asdict(p) if hasattr(p, "set_idx") else p
+            for p in self.set_perfs
+        ]
         return d
 
 
@@ -185,6 +204,93 @@ def _detect_set_reps(enc_mm: np.ndarray, fs: float,
     except Exception:
         return 0
     return len(reps)
+
+
+# Gravity for power computation in V2.
+_G = 9.80665
+
+
+def _compute_set_performance(enc_mm: np.ndarray, fs: float,
+                              effective_load_kg: float,
+                              warmup: bool, set_idx: int,
+                              min_rom_mm: float = 100.0) -> SetPerformance:
+    """Per-set performance summary for V2 FI/PDS computation.
+
+    Mirrors ``encoder.analyze_encoder`` but scoped to one set window:
+        - detect rep boundaries on the encoder trace
+        - per-rep mean / peak concentric velocity from the smoothed
+          derivative
+        - per-rep power = effective_load × (g + a) × v
+        - aggregate across reps to per-set means + peaks
+
+    Returns a SetPerformance with all-zeros fields when no reps are
+    detected — the recovery metric pipeline will skip empty sets
+    gracefully.
+    """
+    perf = SetPerformance(
+        set_idx=int(set_idx), warmup=bool(warmup), n_reps=0)
+    if len(enc_mm) < int(fs):
+        return perf
+
+    try:
+        reps_idx = detect_reps(enc_mm, fs, min_rom_mm=min_rom_mm)
+    except Exception:
+        return perf
+    if not reps_idx:
+        return perf
+
+    # Convert to metres and smooth before differentiation. Same constants
+    # as analyze_encoder so the values are comparable across the codebase.
+    x_m = enc_mm.astype(np.float64) / 1000.0
+    x_s = butter_lowpass(x_m, 6.0, fs)
+    v   = numerical_derivative(x_s, fs)             # m/s
+    a   = numerical_derivative(v,   fs)             # m/s^2
+    # Force on bar (N) = m × (g + a). For our purposes m = effective load
+    # (bar + α × BW for V1.5). When use_bw is off, this collapses to bar.
+    f_n = float(effective_load_kg) * (_G + a)
+    power = f_n * v                                  # W
+
+    mean_v_rep:   list[float] = []
+    peak_v_rep:   list[float] = []
+    mean_p_rep:   list[float] = []
+    peak_p_rep:   list[float] = []
+    rom_per_rep:  list[float] = []
+    work_per_rep: list[float] = []
+
+    for (i_start, i_bot, i_end) in reps_idx:
+        # Concentric segment = bottom → top.
+        v_con = v[i_bot:i_end + 1]
+        if v_con.size == 0:
+            continue
+        v_pos = np.maximum(v_con, 0.0)
+        mean_v_rep.append(float(v_pos.mean()))
+        peak_v_rep.append(float(v_con.max()))
+        # Power during concentric: clamp to ≥0 (eccentric phase has
+        # negative velocity → negative power, which we exclude when
+        # averaging "useful" power output).
+        p_con = power[i_bot:i_end + 1]
+        p_pos = np.maximum(p_con, 0.0)
+        mean_p_rep.append(float(p_pos.mean()))
+        peak_p_rep.append(float(p_con.max()))
+        # ROM in mm + work approximated as load × ROM × g (J).
+        rom = float(enc_mm[i_start:i_end + 1].max()
+                    - enc_mm[i_start:i_end + 1].min())
+        rom_per_rep.append(rom)
+        work_per_rep.append(
+            float(effective_load_kg) * (rom / 1000.0) * _G)
+
+    n = len(mean_p_rep)
+    if n == 0:
+        return perf
+
+    perf.n_reps             = n
+    perf.mean_velocity_m_s  = float(np.mean(mean_v_rep))
+    perf.peak_velocity_m_s  = float(np.mean(peak_v_rep))
+    perf.mean_power_w       = float(np.mean(mean_p_rep))
+    perf.peak_power_w       = float(np.mean(peak_p_rep))
+    perf.rom_mm             = float(np.mean(rom_per_rep))
+    perf.total_work_j       = float(np.sum(work_per_rep))
+    return perf
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -253,6 +359,7 @@ def analyze_strength_3lift(session_dir: str | Path) -> StrengthResult:
     # Per-set boundary records written by the recorder (V1-D).
     set_records: list[dict] = list(meta.get("sets") or [])
     set_results: list[StrengthSetResult] = []
+    set_perfs:   list[SetPerformance] = []          # V2 per-set performance
     sets_for_1rm: list[dict] = []   # (load, reps, warmup) for estimate_1rm_from_sets
 
     for rec in set_records:
@@ -271,7 +378,13 @@ def analyze_strength_3lift(session_dir: str | Path) -> StrengthResult:
         bar_signal = enc1_w
         if (np.ptp(bar_signal) < 5.0) and (np.ptp(enc2_w) >= 5.0):
             bar_signal = enc2_w
-        n_reps = _detect_set_reps(bar_signal, force.fs)
+        # V2 — full per-set performance summary (ROM, velocity, power,
+        # work). Reps count is reused from this since detect_reps
+        # already runs inside _compute_set_performance.
+        perf = _compute_set_performance(
+            bar_signal, force.fs, eff_kg, warmup, int(rec["set_idx"]))
+        set_perfs.append(perf)
+        n_reps = perf.n_reps
 
         srec = StrengthSetResult(
             set_idx=int(rec["set_idx"]),
@@ -375,6 +488,16 @@ def analyze_strength_3lift(session_dir: str | Path) -> StrengthResult:
         result.thresholds_kg     = grade_payload["thresholds_kg"]
         result.ratio_to_elite    = grade_payload["ratio_to_elite"]
         result.ratio_to_beginner = grade_payload["ratio_to_beginner"]
+
+    # ── ATP-PCr recovery (V2) ───────────────────────────────────────────
+    # Mean concentric power is the primary variable. The recovery
+    # pipeline picks the working sets (warmup excluded) and computes
+    # FI / PDS / fiber tendency. Returns gracefully with skipped_reason
+    # if there are fewer than 2 working sets or no usable encoder data.
+    result.set_perfs = set_perfs
+    rec_metrics = compute_recovery_metrics(
+        set_perfs, variable="mean_power_w")
+    result.recovery = rec_metrics.to_dict()
     return result
 
 
