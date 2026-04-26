@@ -274,16 +274,15 @@ class StrengthCompositeSection(ReportSection):
             diagram_png = None
             bars_png = None
         if diagram_png and bars_png:
-            two_up = Table(
-                [[Image(BytesIO(diagram_png), width=70 * mm, height=88 * mm),
-                  Image(BytesIO(bars_png),    width=100 * mm, height=50 * mm)]],
-                colWidths=[72 * mm, 100 * mm])
-            two_up.setStyle(TableStyle([
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING",  (0, 0), (-1, -1), 0),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-            ]))
-            flow.append(two_up)
+            # V3-vis — wider front+back diagram (8.5"x7.5" aspect)
+            # placed above the per-region bar chart (full-width).
+            # The front+back two-panel needs more horizontal room, so
+            # we stack vertically rather than side-by-side.
+            flow.append(Image(BytesIO(diagram_png),
+                              width=170 * mm, height=80 * mm))
+            flow.append(Spacer(1, 6))
+            flow.append(Image(BytesIO(bars_png),
+                              width=170 * mm, height=60 * mm))
             flow.append(Spacer(1, 6))
 
         # Source-session table

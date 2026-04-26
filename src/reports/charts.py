@@ -820,123 +820,284 @@ _COMPOSITE_GRADE_COLORS: dict[int, str] = {
 _UNMEASURED_COLOR = "#E0E0E0"
 
 
-def make_body_strength_diagram(region_grades: dict,
-                                region_one_rm: dict,
-                                width_in: float = 5.5,
-                                height_in: float = 7.0) -> bytes:
-    """Frontal anatomical-zone diagram with per-region grade fill.
+_BODY_FILL = "#F5F5F5"           # silhouette base fill
+_BODY_OUTLINE = "#9E9E9E"        # silhouette outline
 
-    ``region_grades`` is a dict ``{region: grade(1-7)}``. Missing
-    regions are rendered grey with "—" label. ``region_one_rm`` carries
-    the corresponding 1RM kg values for annotation; missing entries
-    fall back to no annotation.
 
-    Layout (matplotlib patches; not anatomically photorealistic but
-    cleanly readable):
+def _body_silhouette_polys() -> dict[str, list[tuple[float, float]]]:
+    """Anatomical-ish polygon coordinates for the silhouette outline.
 
-        ┌──────────┐
-        │  head    │
-        ├──────────┤
-        │ shoulder │   shoulder zone
-        │ chest    │   (3-row torso)
-        │ back     │
-        │whole_body│
-        ├─┬──────┬─┤
-        │L│      │R│   biceps + triceps (per arm)
-        │ │      │ │
-        ├─┴──────┴─┤
-        │   legs   │
-        └──────────┘
+    Coordinate system: x ∈ [0, 10], y ∈ [0, 14], with y up. The same
+    polygons are reused for front and back panels (silhouette outline
+    is symmetric front-to-back; only the muscle overlays differ).
     """
-    setup_korean_fonts()
-    import matplotlib.pyplot as plt
+    return {
+        # Slightly wider torso below the shoulders (chest/back area)
+        # tapering to the waist, then opening to hips.
+        "torso": [
+            (3.55, 11.0), (6.45, 11.0),     # shoulder line
+            (6.65, 10.4), (6.85, 9.6),       # widening to lats
+            (6.7,  8.4), (6.45, 7.4),        # taper to waist
+            (6.35, 6.7),                      # waist
+            (6.6,  6.2), (6.85, 5.7),        # hip flare
+            (6.85, 5.5),                      # hip
+            (3.15, 5.5),
+            (3.15, 5.7), (3.4,  6.2),
+            (3.65, 6.7),
+            (3.55, 7.4), (3.3,  8.4),
+            (3.15, 9.6), (3.35, 10.4),
+        ],
+        "left_arm": [
+            (3.55, 11.0), (3.15, 10.4), (2.95, 10.0),
+            (2.65,  9.0), (2.45,  8.0),
+            (2.30,  7.0), (2.20,  6.2),
+            (2.15,  5.5),                      # wrist
+            (2.40,  5.5), (2.55,  6.2),
+            (2.70,  7.0), (2.90,  8.0),
+            (3.15,  9.0), (3.30, 10.4),
+        ],
+        "right_arm": [
+            (6.45, 11.0), (6.85, 10.4), (7.05, 10.0),
+            (7.35,  9.0), (7.55,  8.0),
+            (7.70,  7.0), (7.80,  6.2),
+            (7.85,  5.5),                      # wrist
+            (7.60,  5.5), (7.45,  6.2),
+            (7.30,  7.0), (7.10,  8.0),
+            (6.85,  9.0), (6.70, 10.4),
+        ],
+        "left_leg": [
+            (3.15, 5.5), (4.85, 5.5),
+            (4.80, 4.6), (4.65, 3.0),
+            (4.55, 1.5), (4.50, 0.4),
+            (3.55, 0.4), (3.45, 1.5),
+            (3.35, 3.0), (3.20, 4.6),
+        ],
+        "right_leg": [
+            (5.15, 5.5), (6.85, 5.5),
+            (6.80, 4.6), (6.65, 3.0),
+            (6.55, 1.5), (6.50, 0.4),
+            (5.55, 0.4), (5.45, 1.5),
+            (5.35, 3.0), (5.20, 4.6),
+        ],
+    }
+
+
+def _draw_silhouette(ax, view: str, region_grades: dict,
+                      region_one_rm: dict) -> None:
+    """Render one silhouette panel (front or back) with per-region
+    coloured overlays and labels.
+
+    ``view`` is ``"front"`` or ``"back"``. Both share the same
+    silhouette outline; the overlays differ:
+
+      front:  shoulder, chest, biceps, whole_body (abs), legs (quads)
+      back:   shoulder, back,  triceps, whole_body (glutes), legs (hams)
+    """
     import matplotlib.patches as mpatches
 
-    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
-    ax.set_xlim(0, 10)
-    ax.set_ylim(0, 14)
-    ax.set_aspect("equal")
-    ax.axis("off")
+    # ── 1. Silhouette outline (light grey) ──────────────────────────
+    polys = _body_silhouette_polys()
+    # Head (separate from torso polygon for cleanness)
+    ax.add_patch(mpatches.Circle((5.0, 12.4), 0.85,
+                                  facecolor=_BODY_FILL,
+                                  edgecolor=_BODY_OUTLINE,
+                                  linewidth=1.4, zorder=1))
+    # Neck — rounded rectangle
+    ax.add_patch(mpatches.FancyBboxPatch(
+        (4.55, 11.05), 0.9, 0.55,
+        boxstyle="round,pad=0.04",
+        facecolor=_BODY_FILL, edgecolor=_BODY_OUTLINE,
+        linewidth=1.2, zorder=1))
+    # Body parts
+    for name, verts in polys.items():
+        ax.add_patch(mpatches.Polygon(
+            verts, closed=True,
+            facecolor=_BODY_FILL, edgecolor=_BODY_OUTLINE,
+            linewidth=1.2, zorder=2))
 
-    def _zone_color(region: str) -> str:
+    # ── 2. Region overlays (colour by grade) ────────────────────────
+    def color_for(region: str) -> str:
         g = region_grades.get(region)
         if g is None or not (1 <= int(g) <= 7):
             return _UNMEASURED_COLOR
         return _COMPOSITE_GRADE_COLORS.get(int(g), _UNMEASURED_COLOR)
 
-    def _zone_text(region: str, region_label: str) -> str:
+    def label_for(region: str, region_label: str) -> str:
         g = region_grades.get(region)
         rm = region_one_rm.get(region)
         if g is None:
-            return f"{region_label}\n—"
-        rm_str = f"{rm:.0f} kg" if rm else "—"
-        return f"{region_label}\n{g}등급 · {rm_str}"
+            return ""           # no overlay → no label
+        rm_str = f"{rm:.0f}kg" if rm else "—"
+        return f"{region_label}\n{g}등급·{rm_str}"
 
-    # Head — neutral grey (decorative).
-    ax.add_patch(mpatches.Circle((5, 13), 0.85,
-                                  facecolor="#BDBDBD", edgecolor="black",
-                                  linewidth=1.0))
+    def add_overlay(region: str, patch, label_xy=None,
+                    label_text=None, fontsize=8):
+        """Common overlay path: color patch + optional label."""
+        color = color_for(region)
+        patch.set_facecolor(color)
+        patch.set_alpha(0.78 if region in region_grades else 0.0)
+        patch.set_edgecolor("none")
+        patch.set_zorder(3)
+        ax.add_patch(patch)
+        if label_xy and region in region_grades:
+            ax.text(label_xy[0], label_xy[1],
+                    label_text or label_for(region, ""),
+                    ha="center", va="center",
+                    fontsize=fontsize, fontweight="bold",
+                    zorder=4, color="#212121",
+                    bbox=dict(boxstyle="round,pad=0.18",
+                              facecolor="white",
+                              edgecolor="none", alpha=0.85))
 
-    # Shoulder band (single horizontal zone).
-    ax.add_patch(mpatches.FancyBboxPatch(
-        (1.5, 11.0), 7.0, 1.2, boxstyle="round,pad=0.04",
-        facecolor=_zone_color("shoulder"), edgecolor="black", linewidth=1.0))
-    ax.text(5, 11.6, _zone_text("shoulder", "어깨"),
-            ha="center", va="center", fontsize=10, fontweight="bold")
+    # Shoulder caps (deltoids) — same on both views
+    if "shoulder" in region_grades:
+        for cx in (3.45, 6.55):
+            add_overlay("shoulder",
+                        mpatches.Ellipse((cx, 10.85), 0.95, 0.55))
+        add_overlay("shoulder",
+                    mpatches.Polygon([(0, 0)], closed=True),
+                    label_xy=(5.0, 11.4),
+                    label_text=label_for("shoulder", "어깨"),
+                    fontsize=8)
 
-    # Torso — chest above, back below (3 zones split vertically).
-    ax.add_patch(mpatches.FancyBboxPatch(
-        (2.0, 9.3), 6.0, 1.5, boxstyle="round,pad=0.04",
-        facecolor=_zone_color("chest"), edgecolor="black", linewidth=1.0))
-    ax.text(5, 10.05, _zone_text("chest", "가슴"),
-            ha="center", va="center", fontsize=10, fontweight="bold")
+    # Front view: chest + biceps + abs (whole_body) + quads (legs)
+    if view == "front":
+        if "chest" in region_grades:
+            add_overlay("chest",
+                        mpatches.Polygon([
+                            (3.65, 10.5), (6.35, 10.5),
+                            (6.55, 9.7),  (5.0,  9.4),
+                            (3.45, 9.7),
+                        ], closed=True),
+                        label_xy=(5.0, 9.95),
+                        label_text=label_for("chest", "가슴"),
+                        fontsize=9)
+        if "biceps" in region_grades:
+            for cx in (2.85, 7.15):
+                add_overlay("biceps",
+                            mpatches.Ellipse((cx, 9.55), 0.55, 0.7))
+            add_overlay("biceps",
+                        mpatches.Polygon([(0, 0)], closed=True),
+                        label_xy=(7.6, 9.55),
+                        label_text=label_for("biceps", "이두"),
+                        fontsize=7)
+        if "whole_body" in region_grades:
+            add_overlay("whole_body",
+                        mpatches.Polygon([
+                            (3.55, 8.7), (6.45, 8.7),
+                            (6.5,  7.5), (5.0,  7.0),
+                            (3.5,  7.5),
+                        ], closed=True),
+                        label_xy=(5.0, 7.85),
+                        label_text=label_for("whole_body", "전신·코어"),
+                        fontsize=8)
+        if "legs" in region_grades:
+            for verts in (
+                [(3.25, 5.4), (4.85, 5.4), (4.80, 3.5),
+                 (4.55, 2.0), (4.50, 0.6), (3.55, 0.6),
+                 (3.45, 2.0), (3.30, 3.5)],
+                [(5.15, 5.4), (6.75, 5.4), (6.70, 3.5),
+                 (6.55, 2.0), (6.50, 0.6), (5.55, 0.6),
+                 (5.45, 2.0), (5.30, 3.5)],
+            ):
+                add_overlay("legs", mpatches.Polygon(verts, closed=True))
+            add_overlay("legs",
+                        mpatches.Polygon([(0, 0)], closed=True),
+                        label_xy=(5.0, 3.2),
+                        label_text=label_for("legs", "하체·대퇴사두"),
+                        fontsize=9)
 
-    ax.add_patch(mpatches.FancyBboxPatch(
-        (2.0, 7.6), 6.0, 1.5, boxstyle="round,pad=0.04",
-        facecolor=_zone_color("back"), edgecolor="black", linewidth=1.0))
-    ax.text(5, 8.35, _zone_text("back", "등"),
-            ha="center", va="center", fontsize=10, fontweight="bold")
+    # Back view: back (lats), triceps, glutes (whole_body), hamstrings (legs)
+    else:
+        if "back" in region_grades:
+            add_overlay("back",
+                        mpatches.Polygon([
+                            (3.55, 10.6), (6.45, 10.6),
+                            (6.65, 9.4),  (5.0, 8.6),
+                            (3.35, 9.4),
+                        ], closed=True),
+                        label_xy=(5.0, 9.6),
+                        label_text=label_for("back", "등·광배"),
+                        fontsize=9)
+        if "triceps" in region_grades:
+            for cx in (2.85, 7.15):
+                add_overlay("triceps",
+                            mpatches.Ellipse((cx, 9.55), 0.55, 0.7))
+            add_overlay("triceps",
+                        mpatches.Polygon([(0, 0)], closed=True),
+                        label_xy=(7.6, 9.55),
+                        label_text=label_for("triceps", "삼두"),
+                        fontsize=7)
+        if "whole_body" in region_grades:
+            # On the back panel, "whole body" = glutes / lower back area
+            add_overlay("whole_body",
+                        mpatches.Polygon([
+                            (3.45, 6.9), (6.55, 6.9),
+                            (6.6,  5.6), (5.0,  5.4),
+                            (3.4,  5.6),
+                        ], closed=True),
+                        label_xy=(5.0, 6.2),
+                        label_text=label_for("whole_body", "전신·둔부"),
+                        fontsize=8)
+        if "legs" in region_grades:
+            for verts in (
+                [(3.25, 5.4), (4.85, 5.4), (4.80, 3.5),
+                 (4.55, 2.0), (4.50, 0.6), (3.55, 0.6),
+                 (3.45, 2.0), (3.30, 3.5)],
+                [(5.15, 5.4), (6.75, 5.4), (6.70, 3.5),
+                 (6.55, 2.0), (6.50, 0.6), (5.55, 0.6),
+                 (5.45, 2.0), (5.30, 3.5)],
+            ):
+                add_overlay("legs", mpatches.Polygon(verts, closed=True))
+            add_overlay("legs",
+                        mpatches.Polygon([(0, 0)], closed=True),
+                        label_xy=(5.0, 3.2),
+                        label_text=label_for("legs", "하체·햄스트링"),
+                        fontsize=9)
 
-    ax.add_patch(mpatches.FancyBboxPatch(
-        (2.0, 5.9), 6.0, 1.5, boxstyle="round,pad=0.04",
-        facecolor=_zone_color("whole_body"), edgecolor="black", linewidth=1.0))
-    ax.text(5, 6.65, _zone_text("whole_body", "전신"),
-            ha="center", va="center", fontsize=10, fontweight="bold")
+    # ── 3. Panel title ─────────────────────────────────────────────
+    ax.set_title("정면 (Anterior)" if view == "front"
+                 else "후면 (Posterior)",
+                 fontsize=10, color="#1976D2", pad=4)
+    ax.set_xlim(0, 10)
+    ax.set_ylim(0, 14)
+    ax.set_aspect("equal")
+    ax.axis("off")
 
-    # Arms — biceps (front of upper arm) above triceps (back).
-    # Left arm
-    ax.add_patch(mpatches.FancyBboxPatch(
-        (0.2, 8.6), 1.5, 1.4, boxstyle="round,pad=0.04",
-        facecolor=_zone_color("biceps"), edgecolor="black", linewidth=1.0))
-    ax.text(0.95, 9.3, _zone_text("biceps", "이두"),
-            ha="center", va="center", fontsize=8)
-    ax.add_patch(mpatches.FancyBboxPatch(
-        (0.2, 7.0), 1.5, 1.4, boxstyle="round,pad=0.04",
-        facecolor=_zone_color("triceps"), edgecolor="black", linewidth=1.0))
-    ax.text(0.95, 7.7, _zone_text("triceps", "삼두"),
-            ha="center", va="center", fontsize=8)
-    # Right arm
-    ax.add_patch(mpatches.FancyBboxPatch(
-        (8.3, 8.6), 1.5, 1.4, boxstyle="round,pad=0.04",
-        facecolor=_zone_color("biceps"), edgecolor="black", linewidth=1.0))
-    ax.text(9.05, 9.3, _zone_text("biceps", "이두"),
-            ha="center", va="center", fontsize=8)
-    ax.add_patch(mpatches.FancyBboxPatch(
-        (8.3, 7.0), 1.5, 1.4, boxstyle="round,pad=0.04",
-        facecolor=_zone_color("triceps"), edgecolor="black", linewidth=1.0))
-    ax.text(9.05, 7.7, _zone_text("triceps", "삼두"),
-            ha="center", va="center", fontsize=8)
 
-    # Legs — split L/R for visual fullness, single zone semantically.
-    ax.add_patch(mpatches.FancyBboxPatch(
-        (2.0, 1.0), 2.5, 4.4, boxstyle="round,pad=0.04",
-        facecolor=_zone_color("legs"), edgecolor="black", linewidth=1.0))
-    ax.add_patch(mpatches.FancyBboxPatch(
-        (5.5, 1.0), 2.5, 4.4, boxstyle="round,pad=0.04",
-        facecolor=_zone_color("legs"), edgecolor="black", linewidth=1.0))
-    ax.text(5, 3.2, _zone_text("legs", "하체"),
-            ha="center", va="center", fontsize=11, fontweight="bold")
+def make_body_strength_diagram(region_grades: dict,
+                                region_one_rm: dict,
+                                width_in: float = 8.5,
+                                height_in: float = 7.5) -> bytes:
+    """Front + back anatomical-zone diagram with per-region grade fill.
 
+    Two side-by-side panels (정면 / 후면) sharing the same silhouette
+    outline. Each panel shows the muscle groups visible from that
+    perspective:
+
+      front: shoulder + chest + biceps + whole_body (abs/core) +
+             legs (quads).
+      back:  shoulder + back + triceps + whole_body (glutes/lower back) +
+             legs (hamstrings).
+
+    Phase V3 commercial polish — replaces the earlier rectangle-based
+    placeholder. Pure matplotlib (no extra deps); patches form a
+    recognisable humanoid silhouette with grade-coloured overlays
+    on the anatomically correct muscle regions.
+    """
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(
+        1, 2, figsize=(width_in, height_in),
+        facecolor="white",
+        gridspec_kw={"wspace": 0.04})
+    _draw_silhouette(axes[0], "front", region_grades, region_one_rm)
+    _draw_silhouette(axes[1], "back",  region_grades, region_one_rm)
+    # tight_layout doesn't play well with axes that have axis("off")
+    # plus fixed aspect — manual margin trim works cleanly here.
+    fig.subplots_adjust(left=0.02, right=0.98, top=0.95, bottom=0.02,
+                        wspace=0.04)
     return _fig_to_png_bytes(fig)
 
 
