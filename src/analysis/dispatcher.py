@@ -40,6 +40,7 @@ def _register_lazy():
     from .proprio        import analyze_proprio_file
     from .free_exercise  import analyze_free_exercise_file
     from .strength_3lift import analyze_strength_3lift_file
+    from .cognitive_reaction import analyze_cognitive_reaction_file
 
     _ANALYZERS.update({
         "balance_eo":     analyze_balance_file,
@@ -53,10 +54,11 @@ def _register_lazy():
         "squat":          analyze_squat_file,
         "overhead_squat": analyze_squat_file,
         "encoder":        analyze_encoder_file,
-        "reaction":       analyze_reaction_file,
-        "proprio":        analyze_proprio_file,
-        "free_exercise":  analyze_free_exercise_file,
-        "strength_3lift": analyze_strength_3lift_file,
+        "reaction":            analyze_reaction_file,
+        "cognitive_reaction":  analyze_cognitive_reaction_file,
+        "proprio":             analyze_proprio_file,
+        "free_exercise":       analyze_free_exercise_file,
+        "strength_3lift":      analyze_strength_3lift_file,
     })
 
 

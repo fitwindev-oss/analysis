@@ -30,6 +30,7 @@ from src.reports.sections.history import HistorySection
 from src.reports.sections.pose_angles import PoseAnglesSection
 from src.reports.sections.proprio import ProprioChartsSection
 from src.reports.sections.reaction import ReactionChartsSection
+from src.reports.sections.cognitive_reaction import CognitiveReactionSection
 from src.reports.sections.squat import SquatChartsSection
 from src.reports.sections.squat_precision import SquatPrecisionSection
 from src.reports.sections.strength_3lift import Strength3LiftSection
@@ -39,15 +40,19 @@ from src.reports.sections.verdict import ExecutiveSummarySection
 
 
 _CHARTS_FOR_TEST: dict[str, Callable[[], ReportSection]] = {
-    "balance_eo":     BalanceChartsSection,
-    "balance_ec":     BalanceChartsSection,
-    "cmj":            CmjChartsSection,
-    "sj":             CmjChartsSection,    # V4 — same charts as CMJ
-    "squat":          SquatChartsSection,
-    "overhead_squat": SquatChartsSection,
-    "encoder":        EncoderChartsSection,
-    "reaction":       ReactionChartsSection,
-    "proprio":        ProprioChartsSection,
+    "balance_eo":          BalanceChartsSection,
+    "balance_ec":          BalanceChartsSection,
+    "cmj":                 CmjChartsSection,
+    "sj":                  CmjChartsSection,    # V4 — same charts as CMJ
+    "squat":               SquatChartsSection,
+    "overhead_squat":      SquatChartsSection,
+    "encoder":             EncoderChartsSection,
+    "reaction":            ReactionChartsSection,
+    # V6 — cognitive reaction has its own dedicated section that owns
+    # both summary table and the three diagnostic charts, so the
+    # primary "charts section" router points to it directly.
+    "cognitive_reaction":  CognitiveReactionSection,
+    "proprio":             ProprioChartsSection,
 }
 
 
@@ -195,6 +200,25 @@ def _reaction_cards(ctx: ReportContext) -> list[MetricCard]:
     ]
 
 
+def _cognitive_reaction_cards(ctx: ReportContext) -> list[MetricCard]:
+    """Top-of-report cards for V6 cognitive reaction.
+
+    No norm-based classification yet — there's no published norm table
+    for "screen-cued positional RT with skeleton tracking" specific to
+    the FITWIN setup. Once we collect ~30 sessions we can derive
+    quartile bands and switch to ``_card``.
+    """
+    r = ctx.result or {}
+    return [
+        _plain_card("trial 수", r.get("n_trials", 0), ""),
+        _plain_card("적중률",   r.get("hit_rate_pct"), " %"),
+        _plain_card("평균 RT",  r.get("mean_rt_ms"),   " ms"),
+        _plain_card("평균 MT",  r.get("mean_mt_ms"),   " ms"),
+        _plain_card("평균 공간 오차",
+                    r.get("mean_spatial_error_norm"), ""),
+    ]
+
+
 def _proprio_cards(ctx: ReportContext) -> list[MetricCard]:
     r = ctx.result or {}
     return [
@@ -238,9 +262,10 @@ _CARD_BUILDERS: dict[str, Callable[[ReportContext], list[MetricCard]]] = {
     "squat":          _squat_cards,
     "overhead_squat": _squat_cards,
     "encoder":        _encoder_cards,
-    "reaction":       _reaction_cards,
-    "proprio":        _proprio_cards,
-    "strength_3lift": _strength_3lift_cards,
+    "reaction":            _reaction_cards,
+    "cognitive_reaction":  _cognitive_reaction_cards,
+    "proprio":             _proprio_cards,
+    "strength_3lift":      _strength_3lift_cards,
 }
 
 

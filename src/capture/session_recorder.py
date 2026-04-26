@@ -52,6 +52,7 @@ TEST_PROMPTS: dict[str, str] = {
     "sj":             "SJ - squat hold on box, then JUMP (no counter-movement)",
     "encoder":        "ENCODER - follow movement prompt",
     "reaction":       "REACTION - respond to stimulus",
+    "cognitive_reaction": "COGNITIVE REACTION - reach hand to cued position",
     "squat":          "SQUAT - perform reps when ready",
     "overhead_squat": "OVERHEAD SQUAT - bar/dowel overhead",
     "proprio":        "PROPRIOCEPTION - follow target cue",
@@ -78,7 +79,38 @@ REACTION_RESPONSES: dict[str, tuple[str, tuple[int, int, int]]] = {
     # Fires once per rep when the operator (or future auto-depth
     # detection) signals the subject should start the concentric push.
     "squat_ascent": ("⚡ UP!",       (170, 245, 0)),   # FITWIN green
+    # Phase V6 — positional stimuli for the cognitive_reaction test.
+    # Each label is the on-screen banner shown to cue the subject;
+    # the actual target XY is logged separately in stimulus_log.csv.
+    "pos_N":  ("↑ 위로",     (170, 245, 0)),
+    "pos_NE": ("↗ 오른쪽 위", (170, 245, 0)),
+    "pos_E":  ("→ 오른쪽",    (170, 245, 0)),
+    "pos_SE": ("↘ 오른쪽 아래", (170, 245, 0)),
+    "pos_S":  ("↓ 아래로",    (170, 245, 0)),
+    "pos_SW": ("↙ 왼쪽 아래", (170, 245, 0)),
+    "pos_W":  ("← 왼쪽",      (170, 245, 0)),
+    "pos_NW": ("↖ 왼쪽 위",   (170, 245, 0)),
 }
+
+# V6 — positional stimulus geometry (normalised image coords, 0..1).
+# Each entry: (label_key, target_x_norm, target_y_norm).
+# (0.5, 0.5) is the camera frame center; lower y is image-top.
+COGNITIVE_REACTION_POSITIONS_8: list[tuple[str, float, float]] = [
+    ("pos_N",  0.50, 0.20),
+    ("pos_NE", 0.78, 0.25),
+    ("pos_E",  0.85, 0.50),
+    ("pos_SE", 0.78, 0.75),
+    ("pos_S",  0.50, 0.80),
+    ("pos_SW", 0.22, 0.75),
+    ("pos_W",  0.15, 0.50),
+    ("pos_NW", 0.22, 0.25),
+]
+COGNITIVE_REACTION_POSITIONS_4: list[tuple[str, float, float]] = [
+    ("pos_N", 0.50, 0.20),
+    ("pos_E", 0.85, 0.50),
+    ("pos_S", 0.50, 0.80),
+    ("pos_W", 0.15, 0.50),
+]
 
 
 @dataclass
@@ -120,6 +152,14 @@ class RecorderConfig:
     # Encoder hardware usage (non-balance tests). When False, replay hides
     # encoder timeseries + bars so the user knows no bar/rod was attached.
     uses_encoder:         bool  = True
+    # ── Cognitive reaction (Phase V6) ────────────────────────────────────
+    # Active only when test == "cognitive_reaction". Uses the existing
+    # n_stimuli / stim_min_gap / stim_max_gap timing fields. The
+    # positional cues come from the COGNITIVE_REACTION_POSITIONS_{4,8}
+    # tables; pose tracking after each stim measures RT + accuracy.
+    react_track_body_part: str = "right_hand"      # right_hand / left_hand /
+                                                    # right_foot / left_foot
+    react_n_positions:     int = 4                  # 4 (cardinal) or 8
     # ── Strength 3-lift multi-set (Phase V1-D) ───────────────────────────
     # Active only when test == "strength_3lift". The recorder cycles
     # through `n_sets` recordings separated by `rest_s` of inter-set rest.
@@ -435,9 +475,41 @@ class SessionRecorder:
             return safe[:12]
         if cfg.test == "reaction":
             return f"{cfg.n_stimuli}x{cfg.trigger}"
+        if cfg.test == "cognitive_reaction":
+            # e.g. "right_hand_4pos_10x"
+            bp = cfg.react_track_body_part.replace("-", "_")
+            return f"{bp}_{cfg.react_n_positions}pos_{cfg.n_stimuli}x"
         return ""
 
     def _prepare_reaction_pool(self) -> None:
+        # Phase V6 — cognitive_reaction shares the same scheduling
+        # machinery as classic ``reaction``; the difference is the
+        # response-pool keys (positional pos_*) and that the analyzer
+        # extracts the response from pose data automatically.
+        if self.cfg.test == "cognitive_reaction":
+            n_pos = self.cfg.react_n_positions
+            pool_table = (COGNITIVE_REACTION_POSITIONS_8
+                          if n_pos >= 8 else
+                          COGNITIVE_REACTION_POSITIONS_4)
+            self._response_pool = [k for (k, _, _) in pool_table]
+            # Cache the position lookup for stim event metadata.
+            self._cog_pos_lookup = {k: (x, y) for (k, x, y) in pool_table}
+            self._log(
+                f"cognitive_reaction pool: {self._response_pool} "
+                f"(track={self.cfg.react_track_body_part})")
+            if self.cfg.trigger == "auto":
+                rng = random.Random()
+                t_cur = 2.0
+                for _ in range(self.cfg.n_stimuli):
+                    t_cur += rng.uniform(self.cfg.stim_min_gap,
+                                          self.cfg.stim_max_gap)
+                    if t_cur >= self.cfg.duration_s - 1:
+                        break
+                    self._stim_times.append(
+                        (t_cur, rng.choice(self._response_pool)))
+                self._log(f"scheduled {len(self._stim_times)} auto stimuli")
+            return
+
         if self.cfg.test != "reaction":
             return
         if self.cfg.responses == "random":
@@ -824,15 +896,33 @@ class SessionRecorder:
         self._state.phase = "done"
 
     def _fire_stim(self, response_type: str, now_ns: int) -> None:
-        self._stim_events.append({
+        ev = {
             "trial_idx":     len(self._stim_events),
             "t_wall":        time.time(),
             "t_ns":          time.monotonic_ns(),
             "stimulus_type": "audio_visual",
             "response_type": response_type,
-        })
+        }
+        # Phase V6 — attach normalised target XY for cognitive_reaction
+        # so the offline analyzer can compute spatial accuracy without
+        # consulting the position lookup table separately. The cue is
+        # held on screen for ~1.5 s (longer than reaction's 0.5 s) so
+        # the subject has time to reach.
+        cog_lookup = getattr(self, "_cog_pos_lookup", None)
+        if (self.cfg.test == "cognitive_reaction"
+                and cog_lookup is not None
+                and response_type in cog_lookup):
+            tx, ty = cog_lookup[response_type]
+            ev["target_x_norm"] = tx
+            ev["target_y_norm"] = ty
+            ev["target_label"]  = response_type
+        self._stim_events.append(ev)
         self._state.n_stim_fired = len(self._stim_events)
-        self._stim_banner_until  = now_ns / 1e9 + 0.5
+        # Hold the visual cue longer for cognitive_reaction (subject
+        # needs time to physically reach the position) than for the
+        # classic reaction test where the response is a single jump.
+        banner_hold_s = 1.5 if self.cfg.test == "cognitive_reaction" else 0.5
+        self._stim_banner_until  = now_ns / 1e9 + banner_hold_s
         self._stim_banner_type   = response_type
         label = REACTION_RESPONSES.get(response_type, ("NOW!", (0, 0, 255)))[0]
         self._state.stim_banner = label
@@ -1037,14 +1127,32 @@ class SessionRecorder:
         self._log(f"events.csv: {len(events)} departure events")
 
     def _write_stim_log(self, path: Path) -> None:
+        # Phase V6 — when the test is cognitive_reaction we add three
+        # extra columns (target_x_norm, target_y_norm, target_label) so
+        # the offline analyzer can map each stim to a target XY without
+        # rebuilding the position lookup. For other tests the schema
+        # stays identical to pre-V6 — keeps replay/legacy parsing intact.
+        is_cog = (self.cfg.test == "cognitive_reaction")
+        cols = ["trial_idx", "t_wall", "t_ns",
+                "stimulus_type", "response_type"]
+        if is_cog:
+            cols += ["target_x_norm", "target_y_norm", "target_label"]
         with open(path, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["trial_idx", "t_wall", "t_ns",
-                        "stimulus_type", "response_type"])
+            w.writerow(cols)
             for e in self._stim_events:
-                w.writerow([e["trial_idx"], f"{e['t_wall']:.6f}",
-                            e["t_ns"], e["stimulus_type"],
-                            e.get("response_type", "")])
+                row = [e["trial_idx"], f"{e['t_wall']:.6f}",
+                       e["t_ns"], e["stimulus_type"],
+                       e.get("response_type", "")]
+                if is_cog:
+                    tx = e.get("target_x_norm")
+                    ty = e.get("target_y_norm")
+                    row += [
+                        "" if tx is None else f"{tx:.4f}",
+                        "" if ty is None else f"{ty:.4f}",
+                        e.get("target_label", ""),
+                    ]
+                w.writerow(row)
         self._log(f"stimulus_log.csv: {len(self._stim_events)} events")
 
     def _build_metadata(self, cancelled: bool) -> dict:
@@ -1093,6 +1201,20 @@ class SessionRecorder:
             "stance":            stance_mode,
             "reaction_trigger":  cfg.trigger    if cfg.test == "reaction" else None,
             "reaction_responses": self._response_pool if cfg.test == "reaction" else None,
+            # ── Cognitive reaction (Phase V6) ─────────────────────────
+            # Persisted so the analyzer + replay know what body part was
+            # tracked and which positions were in the rotation. Shape of
+            # cog_positions: list of [label, x_norm, y_norm].
+            "cog_track_body_part":
+                cfg.react_track_body_part if cfg.test == "cognitive_reaction" else None,
+            "cog_n_positions":
+                cfg.react_n_positions     if cfg.test == "cognitive_reaction" else None,
+            "cog_trigger":
+                cfg.trigger               if cfg.test == "cognitive_reaction" else None,
+            "cog_positions": (
+                [[k, x, y] for k, (x, y) in (
+                    getattr(self, "_cog_pos_lookup", {}) or {}).items()]
+                if cfg.test == "cognitive_reaction" else None),
             "encoder_prompt":    cfg.encoder_prompt if cfg.test == "encoder" else None,
             # Free exercise — load_kg has already been adjusted by
             # use_bodyweight_load in RecorderConfig.__post_init__, so the

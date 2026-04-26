@@ -1493,3 +1493,190 @@ def make_strength_per_set_bars(per_set: list[dict],
     ax.grid(True, axis="y", linestyle=":", alpha=0.4)
     fig.tight_layout()
     return _fig_to_png_bytes(fig)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# V6 — Cognitive reaction
+# ─────────────────────────────────────────────────────────────────────────────
+
+def make_cognitive_rt_histogram(rt_values_ms: Sequence[float],
+                                 mean_rt_ms: Optional[float] = None,
+                                 ref_band_ms: Optional[tuple[float, float]]
+                                 = (250.0, 450.0),
+                                 width_in: float = 7.0,
+                                 height_in: float = 2.6) -> bytes:
+    """Histogram of cognitive-reaction RTs with mean + reference band.
+
+    ``ref_band_ms`` shades a "typical young-adult" band (default 250-450 ms);
+    callers can pass None to suppress it. ``mean_rt_ms`` draws a vertical
+    rule at the subject's mean.
+    """
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+
+    rts = [float(v) for v in rt_values_ms if v is not None and np.isfinite(v)]
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+    ax.set_facecolor("white")
+
+    if not rts:
+        ax.text(0.5, 0.5, "유효한 반응 데이터 없음",
+                ha="center", va="center", fontsize=12, color="#999")
+        ax.set_xticks([]); ax.set_yticks([])
+        return _fig_to_png_bytes(fig)
+
+    bin_max = max(900.0, max(rts) * 1.05)
+    bins = np.linspace(0.0, bin_max, 24)
+    ax.hist(rts, bins=bins, color=HISTORY_LINE, edgecolor="white",
+            linewidth=1.0, alpha=0.85)
+
+    if ref_band_ms is not None:
+        lo, hi = ref_band_ms
+        ax.axvspan(lo, hi, color=NORM_BAND_FILL, alpha=0.45,
+                   label=f"기준대 {lo:.0f}-{hi:.0f} ms", zorder=0)
+
+    if mean_rt_ms is not None and np.isfinite(mean_rt_ms):
+        ax.axvline(float(mean_rt_ms), color=STATUS_WARNING,
+                   linestyle="--", linewidth=1.6,
+                   label=f"평균 {mean_rt_ms:.0f} ms")
+
+    ax.set_xlabel("반응 시간 (ms)", fontsize=10)
+    ax.set_ylabel("빈도", fontsize=10)
+    ax.set_title("반응 시간 분포", fontsize=11, loc="left",
+                 color="#1976D2")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(True, axis="y", linestyle=":", alpha=0.4)
+    ax.legend(loc="upper right", fontsize=8, frameon=False)
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
+def make_cognitive_accuracy_polar(per_target: dict,
+                                   hit_tolerance_norm: float = 0.12,
+                                   width_in: float = 5.6,
+                                   height_in: float = 5.6) -> bytes:
+    """Per-direction error polar chart for cognitive reaction.
+
+    ``per_target`` is the dict returned by CognitiveReactionResult.per_target:
+        {"pos_N": {"n":..., "n_hit":..., "mean_err_norm": ...}, ...}
+
+    Each direction gets a bar whose length is its mean spatial error
+    (normalised image-diagonal units). The hit-tolerance circle is
+    drawn as a green reference ring so the reader can immediately see
+    which directions are inside the "hit" band.
+    """
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+
+    # Map label → angle (radians, 0 = east, ccw). Match what the
+    # recorder shows on screen so users see the same geometry.
+    label_angle = {
+        "pos_E":   0.0,
+        "pos_NE":  np.pi / 4,
+        "pos_N":   np.pi / 2,
+        "pos_NW":  3 * np.pi / 4,
+        "pos_W":   np.pi,
+        "pos_SW":  5 * np.pi / 4,
+        "pos_S":   3 * np.pi / 2,
+        "pos_SE":  7 * np.pi / 4,
+    }
+
+    fig = plt.figure(figsize=(width_in, height_in), facecolor="white")
+    ax = fig.add_subplot(111, projection="polar")
+    ax.set_facecolor("white")
+
+    # Determine an outer radius so the chart doesn't blow up if some
+    # trial completely missed the target.
+    errs = [v.get("mean_err_norm")
+            for v in per_target.values()
+            if v.get("mean_err_norm") is not None and np.isfinite(v["mean_err_norm"])]
+    r_max = max([hit_tolerance_norm * 1.5] + errs) if errs else hit_tolerance_norm * 1.5
+    ax.set_ylim(0.0, r_max)
+
+    # Reference ring at the hit tolerance.
+    theta_full = np.linspace(0, 2 * np.pi, 200)
+    ax.plot(theta_full, np.full_like(theta_full, hit_tolerance_norm),
+            color=STATUS_OK, linewidth=1.5,
+            label=f"적중 허용 {hit_tolerance_norm:.02f}")
+
+    # Per-direction bars
+    for label, ang in label_angle.items():
+        info = per_target.get(label)
+        if not info:
+            continue
+        err = info.get("mean_err_norm")
+        if err is None or not np.isfinite(err):
+            continue
+        n_hit = info.get("n_hit", 0)
+        n_total = info.get("n", 1) or 1
+        within = err <= hit_tolerance_norm
+        color = STATUS_OK if within else STATUS_WARNING
+        ax.bar(ang, err, width=np.pi / 6, bottom=0.0,
+               color=color, alpha=0.65, edgecolor="white", linewidth=0.5)
+        # Hit-rate annotation just outside the bar tip
+        ax.text(ang, err + r_max * 0.06,
+                f"{n_hit}/{n_total}",
+                ha="center", va="center", fontsize=8,
+                color="#424242")
+
+    # Direction labels
+    ax.set_xticks(list(label_angle.values()))
+    ax.set_xticklabels(["E", "NE", "N", "NW", "W", "SW", "S", "SE"],
+                       fontsize=9)
+    ax.set_yticklabels([])  # radial scale numbers are noise here
+    ax.grid(True, linestyle=":", alpha=0.4)
+    ax.set_title("방향별 공간 정확도\n(짧을수록 좋음)",
+                 fontsize=11, color="#1976D2", pad=18)
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, -0.12),
+              fontsize=8, frameon=False, ncol=1)
+    return _fig_to_png_bytes(fig)
+
+
+def make_cognitive_rt_per_target(per_target: dict,
+                                  width_in: float = 7.0,
+                                  height_in: float = 2.6) -> bytes:
+    """Bar chart of mean RT split by target direction."""
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+
+    # Stable order — 4-pos and 8-pos sessions both fit.
+    order = ["pos_N", "pos_NE", "pos_E", "pos_SE",
+             "pos_S", "pos_SW", "pos_W", "pos_NW"]
+    labels_ko = {
+        "pos_N":  "↑",
+        "pos_NE": "↗",
+        "pos_E":  "→",
+        "pos_SE": "↘",
+        "pos_S":  "↓",
+        "pos_SW": "↙",
+        "pos_W":  "←",
+        "pos_NW": "↖",
+    }
+    items = [(k, per_target[k]) for k in order if k in per_target]
+
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+    ax.set_facecolor("white")
+    if not items:
+        ax.text(0.5, 0.5, "방향별 데이터 없음",
+                ha="center", va="center", fontsize=12, color="#999")
+        ax.set_xticks([]); ax.set_yticks([])
+        return _fig_to_png_bytes(fig)
+
+    xs = list(range(len(items)))
+    rt_means = [float(it[1].get("mean_rt_ms") or 0.0) for it in items]
+    n_arr   = [int(it[1].get("n", 0)) for it in items]
+    bars = ax.bar(xs, rt_means, color=HISTORY_LINE,
+                   edgecolor="white", linewidth=1.0, alpha=0.85)
+    # n trial annotation
+    ymax = max(rt_means) if rt_means else 1.0
+    for x, rt, n in zip(xs, rt_means, n_arr):
+        ax.text(x, rt + ymax * 0.03, f"n={n}",
+                ha="center", va="bottom", fontsize=8, color="#424242")
+    ax.set_xticks(xs)
+    ax.set_xticklabels([labels_ko[it[0]] for it in items], fontsize=12)
+    ax.set_ylabel("평균 RT (ms)", fontsize=10)
+    ax.set_title("방향별 반응 시간", fontsize=11, loc="left",
+                 color="#1976D2")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(True, axis="y", linestyle=":", alpha=0.4)
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
