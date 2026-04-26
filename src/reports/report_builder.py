@@ -32,6 +32,7 @@ from src.reports.sections.proprio import ProprioChartsSection
 from src.reports.sections.reaction import ReactionChartsSection
 from src.reports.sections.squat import SquatChartsSection
 from src.reports.sections.squat_precision import SquatPrecisionSection
+from src.reports.sections.strength_3lift import Strength3LiftSection
 from src.reports.sections.verdict import ExecutiveSummarySection
 
 
@@ -201,6 +202,31 @@ def _proprio_cards(ctx: ReportContext) -> list[MetricCard]:
     ]
 
 
+def _strength_3lift_cards(ctx: ReportContext) -> list[MetricCard]:
+    """Top-of-report cards for V1 strength assessment.
+
+    Uses _plain_card (no automatic ok/caution classification) because
+    the per-grade norm comparison is already shown in the dedicated
+    band chart further down the report.
+    """
+    r = ctx.result or {}
+    sets = r.get("sets") or []
+    n_total = r.get("n_sets", 0) or 0
+    n_working = r.get("n_working_sets", 0) or 0
+    grade = r.get("grade")
+    grade_label = r.get("grade_label") or "—"
+    grade_str = (f"{grade} {grade_label}" if grade is not None else "—")
+    # Total reps across working sets (informational)
+    total_reps = sum(int(s.get("n_reps", 0))
+                     for s in sets if not s.get("warmup", False))
+    return [
+        _plain_card("추정 1RM", r.get("best_1rm_kg"), " kg"),
+        _plain_card("등급", grade_str, ""),
+        _plain_card("세트", f"{n_working} / {n_total}", ""),
+        _plain_card("총 반복 (워밍업 제외)", total_reps, " 회"),
+    ]
+
+
 _CARD_BUILDERS: dict[str, Callable[[ReportContext], list[MetricCard]]] = {
     "balance_eo":     _balance_cards,
     "balance_ec":     _balance_cards,
@@ -210,6 +236,7 @@ _CARD_BUILDERS: dict[str, Callable[[ReportContext], list[MetricCard]]] = {
     "encoder":        _encoder_cards,
     "reaction":       _reaction_cards,
     "proprio":        _proprio_cards,
+    "strength_3lift": _strength_3lift_cards,
 }
 
 
@@ -246,6 +273,10 @@ def build_trainer_report(ctx: ReportContext) -> list[ReportSection]:
     # Squat precision (Phase S1d) — only triggers for squat/overhead_squat,
     # otherwise SquatPrecisionSection.to_pdf_flowables returns [].
     sections.append(SquatPrecisionSection())
+    # Strength 3-lift (Phase V1-G) — only triggers for ``strength_3lift``,
+    # else returns empty content. Renders a 1-7 grade badge, threshold
+    # band, per-set bars + table.
+    sections.append(Strength3LiftSection())
     sections += [
         DetailSection(),
         PoseAnglesSection(),
@@ -274,6 +305,10 @@ def build_subject_report(ctx: ReportContext) -> list[ReportSection]:
     charts = _charts_section_for(ctx)
     if charts is not None:
         sections.append(charts)
+    # Strength 3-lift on the subject report too — the 1-7 grade is
+    # exactly the kind of digestible output a non-expert subject can act
+    # on. The section guard keeps it inert for other test types.
+    sections.append(Strength3LiftSection())
     sections.append(GlossarySection())
     sections.append(FooterSection())
     return sections

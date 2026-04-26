@@ -554,3 +554,179 @@ def make_proprio_scatter(trials: list[dict],
     ax.grid(True, linestyle=":", alpha=0.4)
     fig.tight_layout()
     return _fig_to_png_bytes(fig)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Strength 3-lift (Phase V1-G)
+# ─────────────────────────────────────────────────────────────────────────────
+def make_strength_grade_band(thresholds_kg: dict, one_rm_kg: float,
+                              exercise_label: str = "",
+                              width_in: float = 7.5,
+                              height_in: float = 1.6) -> bytes:
+    """Horizontal grade-band visualisation for a strength_3lift result.
+
+    Renders the five population zones (Beginner / Novice / Intermediate /
+    Advanced / Elite) as adjacent coloured bars with the subject's 1RM
+    marked above as a vertical line + value badge. Below-beginner is
+    rendered as a hatched red prefix (warning zone), and the bar
+    extends a bit past elite so subjects who exceed the elite threshold
+    still get a visible marker.
+
+    ``thresholds_kg`` must be the dict returned by
+    ``strength_norms.grade_1rm`` (keys: beginner, novice, intermediate,
+    advanced, elite — all in kg).
+    """
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+
+    beg  = float(thresholds_kg["beginner"])
+    nov  = float(thresholds_kg["novice"])
+    inter = float(thresholds_kg["intermediate"])
+    adv  = float(thresholds_kg["advanced"])
+    eli  = float(thresholds_kg["elite"])
+    val  = float(one_rm_kg)
+
+    # X axis: from 60% of beginner (warning zone start) to max(elite,
+    # subject 1RM) + 10% headroom so the marker is always visible.
+    x_lo = 0.60 * beg
+    x_hi = max(eli, val) * 1.05
+
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+
+    # Below-beginner warning zone (60-100% of beginner) — hatched red.
+    ax.barh([0], [beg - x_lo], left=[x_lo],
+            color="#FFCDD2", edgecolor="#C62828",
+            hatch="///", linewidth=0.4, height=0.55)
+    # Five zones, blue-green-yellow-orange-red-ish progression.
+    zone_colors = ["#EF5350",  # Beginner → 5등급 위험 (red)
+                   "#FFA726",  # Novice   → 4등급 나쁨 (orange)
+                   "#FFEE58",  # Intermed → 3등급 보통 (yellow)
+                   "#9CCC65",  # Advanced → 2등급 좋음 (light green)
+                   "#26A69A"]  # Elite    → 1등급 엘리트 (teal)
+    zone_labels = ["Beginner", "Novice", "Intermediate", "Advanced", "Elite"]
+    zone_kr     = ["위험\n(5등급)", "나쁨\n(4등급)", "보통\n(3등급)",
+                   "좋음\n(2등급)", "엘리트\n(1등급)"]
+    edges = [beg, nov, inter, adv, eli]
+    starts = [beg, nov, inter, adv]
+    for i in range(5):
+        start = starts[i] if i < 4 else adv
+        end = edges[i + 1] if i < 4 else x_hi
+        if i == 4:
+            # Elite zone extends to x_hi
+            start = adv
+            end = x_hi
+        else:
+            start = starts[i]
+            end = edges[i]
+        # Skip negative-width edge cases (shouldn't happen with monotonic thresholds).
+        if end <= start:
+            continue
+        ax.barh([0], [end - start], left=[start],
+                color=zone_colors[i], edgecolor="white",
+                linewidth=0.8, height=0.55)
+        # Zone label (small, centered)
+        midx = (start + end) / 2
+        ax.text(midx, -0.55, zone_kr[i], ha="center", va="top",
+                fontsize=8, color="#424242")
+        # Threshold tick value above the bar
+        if i < 4:
+            ax.text(end, 0.35, f"{end:.0f}", ha="center", va="bottom",
+                    fontsize=8, color="#666666")
+
+    # Subject's 1RM marker — vertical line + value badge.
+    ax.axvline(val, color="#212121", linewidth=2.2, ymin=0.0, ymax=0.95)
+    badge_color = (
+        "#26A69A" if val >= eli  else
+        "#9CCC65" if val >= adv  else
+        "#FBC02D" if val >= inter else
+        "#FFA726" if val >= nov  else
+        "#EF5350" if val >= beg  else
+        "#B71C1C"
+    )
+    ax.scatter([val], [0.45], s=160, marker="v",
+               color=badge_color, edgecolor="black", linewidth=1.2,
+               zorder=5)
+    ax.text(val, 0.85, f"{val:.1f} kg",
+            ha="center", va="bottom",
+            fontsize=11, fontweight="bold",
+            color="#212121",
+            bbox=dict(boxstyle="round,pad=0.25",
+                      facecolor="white", edgecolor=badge_color,
+                      linewidth=1.4))
+
+    title_parts = ["1RM 등급"]
+    if exercise_label:
+        title_parts.append(f"({exercise_label})")
+    ax.set_title("  ".join(title_parts), fontsize=11, loc="left",
+                 color="#1976D2")
+    ax.set_yticks([])
+    ax.set_xlim(x_lo, x_hi)
+    ax.set_ylim(-1.0, 1.4)
+    ax.set_xlabel("1RM (kg)", fontsize=9, color="#666666")
+    ax.spines[["top", "right", "left"]].set_visible(False)
+    ax.tick_params(axis="x", labelsize=8)
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
+def make_strength_per_set_bars(per_set: list[dict],
+                                width_in: float = 7.5,
+                                height_in: float = 2.5) -> bytes:
+    """Per-set vertical bar chart of estimated 1RM with reliability tint.
+
+    ``per_set`` is the list of StrengthSetResult dicts (after to_dict).
+    Warmup sets are rendered with reduced opacity + diagonal hatch so
+    they're visually distinct from working sets.
+    """
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+    if not per_set:
+        # Empty placeholder
+        fig, ax = plt.subplots(figsize=(width_in, height_in),
+                               facecolor="white")
+        ax.text(0.5, 0.5, "측정 데이터 없음", ha="center", va="center",
+                fontsize=14, color="#999")
+        ax.set_xticks([]); ax.set_yticks([])
+        return _fig_to_png_bytes(fig)
+
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+    xs = list(range(1, len(per_set) + 1))
+    rel_color = {
+        "excellent":  "#1B5E20",
+        "high":       "#2E7D32",
+        "medium":     "#558B2F",
+        "low":        "#F9A825",
+        "unreliable": "#C62828",
+    }
+    bar_colors = [rel_color.get(s.get("reliability", "unreliable"), "#9E9E9E")
+                  for s in per_set]
+    one_rms = [float(s.get("one_rm_kg") or 0.0) for s in per_set]
+    warmups = [bool(s.get("warmup", False)) for s in per_set]
+    bars = ax.bar(xs, one_rms, color=bar_colors, edgecolor="white",
+                  linewidth=1.2)
+    # Tint warmup bars (lower alpha + hatch).
+    for b, wu in zip(bars, warmups):
+        if wu:
+            b.set_alpha(0.45)
+            b.set_hatch("///")
+    # Annotate each bar with reps × load.
+    for x, s, val in zip(xs, per_set, one_rms):
+        reps = s.get("n_reps", 0)
+        load = s.get("load_kg", 0)
+        ax.text(x, val + max(one_rms) * 0.02 if val > 0 else 0.5,
+                f"{reps}회\n@ {load:.0f}kg",
+                ha="center", va="bottom", fontsize=9, color="#424242")
+
+    ax.set_xticks(xs)
+    ax.set_xticklabels([
+        f"세트 {i}" + (" (워밍업)" if w else "")
+        for i, w in zip(xs, warmups)
+    ], fontsize=9)
+    ax.set_ylabel("추정 1RM (kg)", fontsize=10)
+    ax.set_title("세트별 1RM 추정", fontsize=11, loc="left",
+                 color="#1976D2")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(True, axis="y", linestyle=":", alpha=0.4)
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
