@@ -147,25 +147,28 @@ def compute_departure_events(force: "ForceSession",
                              min_duration_s: float = 0.05) -> list[dict]:
     """Recompute departure events with hysteresis from a ForceSession.
 
-    Two thresholds (matching the CMJ analyser):
+    Two thresholds — chosen for *visualisation* of "subject was off
+    the plate", not for jump-height calculation:
 
       * **entry** (default 20 N): on-plate → off-plate when GRF drops
         below this. Strict, near-zero — catches actual takeoff.
-      * **exit** (default ``max(50 % BW, 150 N)``): off-plate → on-plate
-        when GRF rises back above this. Higher than entry to skip
-        force-plate ringing — after a CMJ landing, the plate's
-        zero-baseline oscillates around 20 N for ~30-50 ms before
-        actual contact reasserts. A single 20 N exit threshold would
-        false-trigger and split one flight into two events.
+      * **exit** (default 50 N): off-plate → on-plate when GRF rises
+        back above this. Higher than entry as a hysteresis guard
+        against the force plate's post-impact baseline ringing
+        (typically 15–25 N oscillation for 30–50 ms after a hard
+        landing, which would otherwise false-trigger a 20 N exit and
+        split one flight into two events).
 
-    BW is read from session.json's ``subject_kg`` when available;
-    otherwise the exit threshold falls back to ``150 N`` (a value that
-    safely clears the typical ringing band).
+    Why not match the CMJ analyser's ``max(BW × 0.5, 150)`` exit?
+    That convention is for *flight-time-based jump-height calculation*
+    where you want the high-impact landing instant. For "when was the
+    subject off the plate" visualisation, the right end-of-band point
+    is when foot contact resumes — which happens 30–50 ms before force
+    crosses 50 % BW. Using a low absolute exit threshold makes the
+    band agree with what the operator sees in the video frame.
 
-    Use this in UIs that should always reflect the *current* threshold
-    semantics, independent of what was stored in events.csv at
-    recording time. Old sessions recorded under a different threshold
-    get their bands automatically realigned.
+    The two metrics are intentionally different and the CMJ analyser
+    keeps its own threshold for its own purpose.
     """
     # Lazy import to avoid src.capture <-> src.analysis circular when
     # analysis modules are imported during recorder startup.
@@ -177,21 +180,7 @@ def compute_departure_events(force: "ForceSession",
 
     entry = float(DEPARTURE_THRESHOLD_N
                   if entry_threshold_n is None else entry_threshold_n)
-    if exit_threshold_n is None:
-        # Derive from subject_kg via session.json (CMJ-style:
-        # max(BW × 0.5, 150 N)).
-        subject_kg = 0.0
-        try:
-            import json as _json
-            meta_p = Path(force.session_dir) / "session.json"
-            if meta_p.exists():
-                meta = _json.loads(meta_p.read_text(encoding="utf-8"))
-                subject_kg = float(meta.get("subject_kg") or 0.0)
-        except Exception:
-            subject_kg = 0.0
-        exit_th = max(150.0, subject_kg * 9.80665 * 0.50)
-    else:
-        exit_th = float(exit_threshold_n)
+    exit_th = float(50.0 if exit_threshold_n is None else exit_threshold_n)
     # Belt-and-suspenders: exit must be ≥ entry, otherwise hysteresis
     # makes no sense.
     exit_th = max(exit_th, entry)
