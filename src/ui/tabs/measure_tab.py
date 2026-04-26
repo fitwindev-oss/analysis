@@ -755,10 +755,19 @@ class MeasureTab(QWidget):
         self._current_opts = dict(opts)
         # Strip UI-only keys before constructing RecorderConfig
         cfg_kwargs = {k: v for k, v in opts.items() if not k.startswith("_")}
+        # Pull sex / birthdate / height from the DB row so the recorder
+        # writes them into session.json — required by the strength_3lift
+        # 1RM grade lookup (Phase V1-bugfix). Optional fields default to
+        # None on older subject rows; the analyzer falls back to a DB
+        # lookup by subject_id when meta is missing them.
+        subj = self._active_subject
         cfg = RecorderConfig(
-            subject_id=self._active_subject.id,
-            subject_name=self._active_subject.name,
-            subject_kg=self._active_subject.weight_kg,
+            subject_id=subj.id,
+            subject_name=subj.name,
+            subject_kg=subj.weight_kg,
+            subject_sex=getattr(subj, "gender", None),
+            subject_birthdate=getattr(subj, "birthdate", None),
+            subject_height_cm=getattr(subj, "height_cm", None),
             **cfg_kwargs,
         )
         self._append_log(

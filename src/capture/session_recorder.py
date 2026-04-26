@@ -89,6 +89,16 @@ class RecorderConfig:
     subject_id:   Optional[str] = None
     subject_name: Optional[str] = None
     subject_kg:   float = 90.0
+    # Phase V1-bugfix — sex / birthdate are now first-class subject
+    # context fields. They flow from the Subjects DB through MeasureTab
+    # into the recorder, then get written to session.json so the
+    # downstream 1RM grade lookup has everything it needs without
+    # touching the DB at analysis time. Optional for back-compat —
+    # tests or older callers that don't pass them get None, and the
+    # analyzer falls back to a DB lookup by subject_id.
+    subject_sex:        Optional[str] = None     # 'M' / 'F' (any case)
+    subject_birthdate:  Optional[str] = None     # 'YYYY-MM-DD'
+    subject_height_cm:  Optional[float] = None   # informational; future use
     # Balance
     stance: str = "two"
     # Encoder
@@ -1050,6 +1060,14 @@ class SessionRecorder:
             "subject_id":        cfg.subject_id,
             "subject_name":      cfg.subject_name,
             "subject_kg":        cfg.subject_kg,
+            # Phase V1-bugfix — sex/birthdate must reach the analyzer
+            # via session.json (not only via the live DB) so analysis
+            # of older sessions stays reproducible if the DB rotates.
+            "subject_sex":       (cfg.subject_sex.upper()
+                                  if isinstance(cfg.subject_sex, str)
+                                  and cfg.subject_sex else None),
+            "subject_birthdate": cfg.subject_birthdate,
+            "subject_height_cm": cfg.subject_height_cm,
             "smart_wait":        self._stability is not None,
             "vision":            vision,
             "stance":            stance_mode,

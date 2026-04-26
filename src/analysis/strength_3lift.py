@@ -200,11 +200,27 @@ def analyze_strength_3lift(session_dir: str | Path) -> StrengthResult:
             f"unsupported exercise for strength_3lift: {exercise!r} "
             f"(expected one of {VALID_EXERCISES})")
 
-    # Subject context for the grade lookup
+    # Subject context for the grade lookup. Sex / birthdate became
+    # first-class fields in session.json with the V1-bugfix; older
+    # sessions only have ``subject_id`` so we fall back to a DB lookup
+    # for those. ``subject_kg`` has always been in the meta.
     sex = (meta.get("subject_sex") or meta.get("sex")
            or meta.get("gender"))
     bd_str = (meta.get("subject_birthdate") or meta.get("birthdate"))
     bw_kg = float(meta.get("subject_kg") or 0.0)
+    if (not sex or not bd_str) and meta.get("subject_id"):
+        try:
+            from src.db.models import get_subject
+            row = get_subject(meta["subject_id"])
+            if row is not None:
+                sex = sex or getattr(row, "gender", None)
+                bd_str = bd_str or getattr(row, "birthdate", None)
+                if not bw_kg:
+                    bw_kg = float(getattr(row, "weight_kg", 0.0) or 0.0)
+        except Exception:
+            # DB unavailable / schema changed — proceed with whatever
+            # session.json had. The grade step will degrade gracefully.
+            pass
     rec_start_iso = meta.get("record_start_iso") or meta.get("created_at")
     age = _compute_age_years(bd_str, rec_start_iso)
 
