@@ -48,7 +48,8 @@ from src.capture.departure_events import DepartureEventTracker
 TEST_PROMPTS: dict[str, str] = {
     "balance_eo":     "EYES OPEN - stand still",
     "balance_ec":     "EYES CLOSED - stand still (close your eyes NOW)",
-    "cmj":            "CMJ - stand still, then JUMP",
+    "cmj":            "CMJ - stand still, then JUMP (with counter-movement)",
+    "sj":             "SJ - squat hold on box, then JUMP (no counter-movement)",
     "encoder":        "ENCODER - follow movement prompt",
     "reaction":       "REACTION - respond to stimulus",
     "squat":          "SQUAT - perform reps when ready",

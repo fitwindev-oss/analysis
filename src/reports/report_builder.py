@@ -34,6 +34,7 @@ from src.reports.sections.squat import SquatChartsSection
 from src.reports.sections.squat_precision import SquatPrecisionSection
 from src.reports.sections.strength_3lift import Strength3LiftSection
 from src.reports.sections.strength_composite import StrengthCompositeSection
+from src.reports.sections.ssc import SSCSection
 from src.reports.sections.verdict import ExecutiveSummarySection
 
 
@@ -41,6 +42,7 @@ _CHARTS_FOR_TEST: dict[str, Callable[[], ReportSection]] = {
     "balance_eo":     BalanceChartsSection,
     "balance_ec":     BalanceChartsSection,
     "cmj":            CmjChartsSection,
+    "sj":             CmjChartsSection,    # V4 — same charts as CMJ
     "squat":          SquatChartsSection,
     "overhead_squat": SquatChartsSection,
     "encoder":        EncoderChartsSection,
@@ -232,6 +234,7 @@ _CARD_BUILDERS: dict[str, Callable[[ReportContext], list[MetricCard]]] = {
     "balance_eo":     _balance_cards,
     "balance_ec":     _balance_cards,
     "cmj":            _cmj_cards,
+    "sj":             _cmj_cards,    # V4 — SJ shares CMJ's metric shape
     "squat":          _squat_cards,
     "overhead_squat": _squat_cards,
     "encoder":        _encoder_cards,
@@ -283,6 +286,10 @@ def build_trainer_report(ctx: ReportContext) -> list[ReportSection]:
     # bars. Renders only for strength_3lift sessions; the section is a
     # no-op for other test types.
     sections.append(StrengthCompositeSection())
+    # SSC (Phase V4) — CMJ vs SJ comparison with EUR + SSC%. Section
+    # is a no-op when only one of the two jump types has been recorded.
+    # Triggers on cmj / sj / strength_3lift report contexts.
+    sections.append(SSCSection())
     sections += [
         DetailSection(),
         PoseAnglesSection(),
@@ -316,6 +323,7 @@ def build_subject_report(ctx: ReportContext) -> list[ReportSection]:
     # on. The section guard keeps it inert for other test types.
     sections.append(Strength3LiftSection())
     sections.append(StrengthCompositeSection())
+    sections.append(SSCSection())
     sections.append(GlossarySection())
     sections.append(FooterSection())
     return sections

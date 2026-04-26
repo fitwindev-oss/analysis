@@ -27,6 +27,7 @@ TEST_KO = {
     "balance_eo":     "눈 뜨고 밸런스",
     "balance_ec":     "눈 감고 밸런스",
     "cmj":            "CMJ 점프",
+    "sj":             "SJ 스쿼트 점프",
     "squat":          "스쿼트",
     "overhead_squat": "오버헤드 스쿼트",
     "encoder":        "엔코더 (바)",

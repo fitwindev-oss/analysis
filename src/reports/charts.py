@@ -1153,6 +1153,131 @@ def make_strength_per_region_bars(regions: list[dict],
     return _fig_to_png_bytes(fig)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# SSC — CMJ vs SJ comparison (Phase V4)
+# ─────────────────────────────────────────────────────────────────────────────
+_SSC_GRADE_COLORS: dict[int, str] = {
+    1: "#26A69A",
+    2: "#9CCC65",
+    3: "#FBC02D",
+    4: "#FFA726",
+    5: "#EF5350",
+}
+
+
+def make_ssc_jump_comparison(cmj_height_m: float, sj_height_m: float,
+                              eur: float, ssc_pct: float, grade: int,
+                              width_in: float = 6.5,
+                              height_in: float = 2.6) -> bytes:
+    """Side-by-side SJ vs CMJ jump-height bars with the SSC delta
+    annotated as a coloured arc above the bars.
+
+    The bar colours are tinted by the overall SSC grade so the visual
+    matches the badge colour in the surrounding report card.
+    """
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+    sj_cm  = sj_height_m * 100.0
+    cmj_cm = cmj_height_m * 100.0
+    grade_color = _SSC_GRADE_COLORS.get(int(grade or 5), "#9E9E9E")
+
+    bars = ax.bar(
+        ["SJ\n(반동 없음)", "CMJ\n(반동 사용)"],
+        [sj_cm, cmj_cm],
+        color=["#90A4AE", grade_color],
+        edgecolor="white", linewidth=1.2)
+    # Value labels on each bar
+    for b, v in zip(bars, (sj_cm, cmj_cm)):
+        ax.text(b.get_x() + b.get_width() / 2,
+                v + max(sj_cm, cmj_cm) * 0.03,
+                f"{v:.1f} cm",
+                ha="center", va="bottom",
+                fontsize=11, fontweight="bold")
+
+    # SSC delta annotation between bars
+    if cmj_cm > sj_cm:
+        delta_cm = cmj_cm - sj_cm
+        # Connector arrow + percent label
+        y_arrow = max(sj_cm, cmj_cm) * 1.18
+        ax.annotate(
+            f"+{delta_cm:.1f} cm   (SSC {ssc_pct:.1f}%)",
+            xy=(1, y_arrow), xytext=(0.5, y_arrow * 1.05),
+            ha="center", fontsize=10, color=grade_color,
+            fontweight="bold",
+            arrowprops=dict(arrowstyle="->",
+                            color=grade_color, lw=1.4))
+
+    ax.set_ylabel("점프 높이 (cm)", fontsize=10)
+    ax.set_title(
+        f"CMJ vs SJ 비교   EUR = {eur:.2f}   "
+        f"({grade}등급)",
+        fontsize=11, loc="left", color="#1976D2")
+    ax.set_ylim(0, max(sj_cm, cmj_cm) * 1.35)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(True, axis="y", linestyle=":", alpha=0.4)
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
+def make_ssc_grade_band(eur: float, grade: int,
+                         width_in: float = 7.0,
+                         height_in: float = 1.5) -> bytes:
+    """Horizontal grade-band visualisation for EUR.
+
+    Shows the 5 zones (Risk / Poor / Average / Good / Elite) as
+    coloured segments with the subject's EUR marked as a triangle.
+    """
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+
+    # Zone boundaries (from grade table) — left to right (Risk → Elite).
+    zones = [
+        (0.95, 1.00, "#EF5350", "Risk\n(5등급)"),
+        (1.00, 1.04, "#FFA726", "Poor\n(4등급)"),
+        (1.04, 1.09, "#FBC02D", "Avg\n(3등급)"),
+        (1.09, 1.14, "#9CCC65", "Good\n(2등급)"),
+        (1.14, 1.30, "#26A69A", "Elite\n(1등급)"),
+    ]
+    for lo, hi, color, label in zones:
+        ax.barh([0], [hi - lo], left=[lo],
+                color=color, edgecolor="white",
+                linewidth=0.8, height=0.55)
+        ax.text((lo + hi) / 2, -0.55, label,
+                ha="center", va="top", fontsize=8, color="#424242")
+        # Boundary value (skip the leftmost edge)
+        if lo > 0.95:
+            ax.text(lo, 0.36, f"{lo:.2f}", ha="center", va="bottom",
+                    fontsize=8, color="#666666")
+
+    # Subject marker
+    val = max(0.95, min(1.30, float(eur or 0)))
+    badge_color = _SSC_GRADE_COLORS.get(int(grade or 5), "#9E9E9E")
+    ax.axvline(val, color="#212121", linewidth=2.2, ymin=0.0, ymax=0.95)
+    ax.scatter([val], [0.45], s=180, marker="v",
+               color=badge_color, edgecolor="black", linewidth=1.2,
+               zorder=5)
+    ax.text(val, 0.85, f"EUR = {eur:.2f}",
+            ha="center", va="bottom",
+            fontsize=10, fontweight="bold", color="#212121",
+            bbox=dict(boxstyle="round,pad=0.25",
+                      facecolor="white", edgecolor=badge_color,
+                      linewidth=1.4))
+
+    ax.set_xlim(0.95, 1.30)
+    ax.set_ylim(-1.0, 1.4)
+    ax.set_yticks([])
+    ax.set_xlabel("EUR (CMJ 높이 / SJ 높이)", fontsize=9, color="#666")
+    ax.spines[["top", "right", "left"]].set_visible(False)
+    ax.tick_params(axis="x", labelsize=8)
+    ax.set_title("SSC 활용 등급", fontsize=10, loc="left", color="#1976D2")
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
 def make_strength_per_set_bars(per_set: list[dict],
                                 width_in: float = 7.5,
                                 height_in: float = 2.5) -> bytes:

@@ -25,7 +25,8 @@ import config
 TESTS_KO: list[tuple[str, str, float]] = [
     ("balance_eo",     "밸런스 (눈 뜨고)",     30.0),
     ("balance_ec",     "밸런스 (눈 감고)",     30.0),
-    ("cmj",            "CMJ (점프)",           10.0),
+    ("cmj",            "CMJ (반동 점프)",      10.0),
+    ("sj",             "SJ (스쿼트 점프, 반동 없음)", 10.0),
     ("squat",          "스쿼트",               30.0),
     ("overhead_squat", "오버헤드 스쿼트",      30.0),
     ("reaction",       "반응 시간",            60.0),

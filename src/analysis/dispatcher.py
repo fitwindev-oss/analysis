@@ -45,6 +45,11 @@ def _register_lazy():
         "balance_eo":     analyze_balance_file,
         "balance_ec":     analyze_balance_file,
         "cmj":            analyze_cmj_file,
+        # Phase V4 — Squat Jump uses the same takeoff/landing detection
+        # pipeline as CMJ. The biomechanical difference (no
+        # counter-movement) doesn't change the force-time signature
+        # the analyzer cares about (quiet → flight → landing).
+        "sj":             analyze_cmj_file,
         "squat":          analyze_squat_file,
         "overhead_squat": analyze_squat_file,
         "encoder":        analyze_encoder_file,
