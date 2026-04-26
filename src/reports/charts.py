@@ -803,6 +803,195 @@ def make_fiber_tendency_slider(tendency: float,
     return _fig_to_png_bytes(fig)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Composite strength — body diagram + per-region bars (Phase V3)
+# ─────────────────────────────────────────────────────────────────────────────
+# Grade → fill colour. Mirrors the strength_3lift band chart so all
+# strength visualisations share one palette.
+_COMPOSITE_GRADE_COLORS: dict[int, str] = {
+    1: "#26A69A",
+    2: "#9CCC65",
+    3: "#FBC02D",
+    4: "#FFA726",
+    5: "#EF5350",
+    6: "#C62828",
+    7: "#7F0000",
+}
+_UNMEASURED_COLOR = "#E0E0E0"
+
+
+def make_body_strength_diagram(region_grades: dict,
+                                region_one_rm: dict,
+                                width_in: float = 5.5,
+                                height_in: float = 7.0) -> bytes:
+    """Frontal anatomical-zone diagram with per-region grade fill.
+
+    ``region_grades`` is a dict ``{region: grade(1-7)}``. Missing
+    regions are rendered grey with "—" label. ``region_one_rm`` carries
+    the corresponding 1RM kg values for annotation; missing entries
+    fall back to no annotation.
+
+    Layout (matplotlib patches; not anatomically photorealistic but
+    cleanly readable):
+
+        ┌──────────┐
+        │  head    │
+        ├──────────┤
+        │ shoulder │   shoulder zone
+        │ chest    │   (3-row torso)
+        │ back     │
+        │whole_body│
+        ├─┬──────┬─┤
+        │L│      │R│   biceps + triceps (per arm)
+        │ │      │ │
+        ├─┴──────┴─┤
+        │   legs   │
+        └──────────┘
+    """
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+    ax.set_xlim(0, 10)
+    ax.set_ylim(0, 14)
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+    def _zone_color(region: str) -> str:
+        g = region_grades.get(region)
+        if g is None or not (1 <= int(g) <= 7):
+            return _UNMEASURED_COLOR
+        return _COMPOSITE_GRADE_COLORS.get(int(g), _UNMEASURED_COLOR)
+
+    def _zone_text(region: str, region_label: str) -> str:
+        g = region_grades.get(region)
+        rm = region_one_rm.get(region)
+        if g is None:
+            return f"{region_label}\n—"
+        rm_str = f"{rm:.0f} kg" if rm else "—"
+        return f"{region_label}\n{g}등급 · {rm_str}"
+
+    # Head — neutral grey (decorative).
+    ax.add_patch(mpatches.Circle((5, 13), 0.85,
+                                  facecolor="#BDBDBD", edgecolor="black",
+                                  linewidth=1.0))
+
+    # Shoulder band (single horizontal zone).
+    ax.add_patch(mpatches.FancyBboxPatch(
+        (1.5, 11.0), 7.0, 1.2, boxstyle="round,pad=0.04",
+        facecolor=_zone_color("shoulder"), edgecolor="black", linewidth=1.0))
+    ax.text(5, 11.6, _zone_text("shoulder", "어깨"),
+            ha="center", va="center", fontsize=10, fontweight="bold")
+
+    # Torso — chest above, back below (3 zones split vertically).
+    ax.add_patch(mpatches.FancyBboxPatch(
+        (2.0, 9.3), 6.0, 1.5, boxstyle="round,pad=0.04",
+        facecolor=_zone_color("chest"), edgecolor="black", linewidth=1.0))
+    ax.text(5, 10.05, _zone_text("chest", "가슴"),
+            ha="center", va="center", fontsize=10, fontweight="bold")
+
+    ax.add_patch(mpatches.FancyBboxPatch(
+        (2.0, 7.6), 6.0, 1.5, boxstyle="round,pad=0.04",
+        facecolor=_zone_color("back"), edgecolor="black", linewidth=1.0))
+    ax.text(5, 8.35, _zone_text("back", "등"),
+            ha="center", va="center", fontsize=10, fontweight="bold")
+
+    ax.add_patch(mpatches.FancyBboxPatch(
+        (2.0, 5.9), 6.0, 1.5, boxstyle="round,pad=0.04",
+        facecolor=_zone_color("whole_body"), edgecolor="black", linewidth=1.0))
+    ax.text(5, 6.65, _zone_text("whole_body", "전신"),
+            ha="center", va="center", fontsize=10, fontweight="bold")
+
+    # Arms — biceps (front of upper arm) above triceps (back).
+    # Left arm
+    ax.add_patch(mpatches.FancyBboxPatch(
+        (0.2, 8.6), 1.5, 1.4, boxstyle="round,pad=0.04",
+        facecolor=_zone_color("biceps"), edgecolor="black", linewidth=1.0))
+    ax.text(0.95, 9.3, _zone_text("biceps", "이두"),
+            ha="center", va="center", fontsize=8)
+    ax.add_patch(mpatches.FancyBboxPatch(
+        (0.2, 7.0), 1.5, 1.4, boxstyle="round,pad=0.04",
+        facecolor=_zone_color("triceps"), edgecolor="black", linewidth=1.0))
+    ax.text(0.95, 7.7, _zone_text("triceps", "삼두"),
+            ha="center", va="center", fontsize=8)
+    # Right arm
+    ax.add_patch(mpatches.FancyBboxPatch(
+        (8.3, 8.6), 1.5, 1.4, boxstyle="round,pad=0.04",
+        facecolor=_zone_color("biceps"), edgecolor="black", linewidth=1.0))
+    ax.text(9.05, 9.3, _zone_text("biceps", "이두"),
+            ha="center", va="center", fontsize=8)
+    ax.add_patch(mpatches.FancyBboxPatch(
+        (8.3, 7.0), 1.5, 1.4, boxstyle="round,pad=0.04",
+        facecolor=_zone_color("triceps"), edgecolor="black", linewidth=1.0))
+    ax.text(9.05, 7.7, _zone_text("triceps", "삼두"),
+            ha="center", va="center", fontsize=8)
+
+    # Legs — split L/R for visual fullness, single zone semantically.
+    ax.add_patch(mpatches.FancyBboxPatch(
+        (2.0, 1.0), 2.5, 4.4, boxstyle="round,pad=0.04",
+        facecolor=_zone_color("legs"), edgecolor="black", linewidth=1.0))
+    ax.add_patch(mpatches.FancyBboxPatch(
+        (5.5, 1.0), 2.5, 4.4, boxstyle="round,pad=0.04",
+        facecolor=_zone_color("legs"), edgecolor="black", linewidth=1.0))
+    ax.text(5, 3.2, _zone_text("legs", "하체"),
+            ha="center", va="center", fontsize=11, fontweight="bold")
+
+    return _fig_to_png_bytes(fig)
+
+
+def make_strength_per_region_bars(regions: list[dict],
+                                    width_in: float = 7.5,
+                                    height_in: float = 3.5) -> bytes:
+    """Horizontal bar chart, one bar per measured region.
+
+    ``regions`` is a list of dicts with keys: ``region_label``,
+    ``one_rm_kg``, ``grade``. Missing regions can be passed with
+    ``measured=False`` — they render at 0 with grey colour.
+
+    Bars use the composite grade colour palette so the diagram and
+    bars are visually consistent.
+    """
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+
+    if not regions:
+        fig, ax = plt.subplots(figsize=(width_in, height_in),
+                               facecolor="white")
+        ax.text(0.5, 0.5, "측정 데이터 없음", ha="center", va="center",
+                fontsize=14, color="#999")
+        ax.set_xticks([]); ax.set_yticks([])
+        return _fig_to_png_bytes(fig)
+
+    labels  = [r["region_label"] for r in regions]
+    values  = [float(r.get("one_rm_kg") or 0.0) for r in regions]
+    grades  = [int(r.get("grade") or 0) for r in regions]
+    colors  = [_COMPOSITE_GRADE_COLORS.get(g, _UNMEASURED_COLOR)
+               for g in grades]
+
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+    ys = list(range(len(labels)))
+    bars = ax.barh(ys, values, color=colors, edgecolor="white",
+                    linewidth=1.2)
+    for y, v, g, lbl in zip(ys, values, grades, labels):
+        rm_str = f"{v:.0f} kg" if v > 0 else "—"
+        gr_str = f"{g}등급" if g else "(미측정)"
+        ax.text(v + max(values + [1]) * 0.02, y,
+                f"{rm_str}   {gr_str}",
+                va="center", fontsize=10, color="#212121",
+                fontweight="bold")
+    ax.set_yticks(ys)
+    ax.set_yticklabels(labels, fontsize=10)
+    ax.invert_yaxis()
+    ax.set_xlabel("추정 1RM (kg)", fontsize=10)
+    ax.set_title("부위별 1RM × 등급", fontsize=11, loc="left",
+                 color="#1976D2")
+    ax.spines[["top", "right", "left"]].set_visible(False)
+    ax.grid(True, axis="x", linestyle=":", alpha=0.4)
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
 def make_strength_per_set_bars(per_set: list[dict],
                                 width_in: float = 7.5,
                                 height_in: float = 2.5) -> bytes:

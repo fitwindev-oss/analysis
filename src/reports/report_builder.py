@@ -33,6 +33,7 @@ from src.reports.sections.reaction import ReactionChartsSection
 from src.reports.sections.squat import SquatChartsSection
 from src.reports.sections.squat_precision import SquatPrecisionSection
 from src.reports.sections.strength_3lift import Strength3LiftSection
+from src.reports.sections.strength_composite import StrengthCompositeSection
 from src.reports.sections.verdict import ExecutiveSummarySection
 
 
@@ -277,6 +278,11 @@ def build_trainer_report(ctx: ReportContext) -> list[ReportSection]:
     # else returns empty content. Renders a 1-7 grade badge, threshold
     # band, per-set bars + table.
     sections.append(Strength3LiftSection())
+    # Composite strength (Phase V3) — multi-session aggregate across
+    # the 3 lifts the subject has done, with a body diagram + per-region
+    # bars. Renders only for strength_3lift sessions; the section is a
+    # no-op for other test types.
+    sections.append(StrengthCompositeSection())
     sections += [
         DetailSection(),
         PoseAnglesSection(),
@@ -309,6 +315,7 @@ def build_subject_report(ctx: ReportContext) -> list[ReportSection]:
     # exactly the kind of digestible output a non-expert subject can act
     # on. The section guard keeps it inert for other test types.
     sections.append(Strength3LiftSection())
+    sections.append(StrengthCompositeSection())
     sections.append(GlossarySection())
     sections.append(FooterSection())
     return sections
