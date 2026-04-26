@@ -133,12 +133,31 @@ class RecorderConfig:
     session_name_suffix: Optional[str]  = None   # appended after timestamp
 
     def __post_init__(self):
-        # Resolve bodyweight ADDITION at construction time so the saved
+        # Resolve bodyweight addition at construction time so the saved
         # session.json meta records the effective load, not the flag.
-        # Bodyweight is ADDED to external load (e.g. push-up with a 20 kg
-        # weight vest on a 93 kg subject -> effective load 113 kg).
+        #
+        # Two different policies live here on purpose:
+        #
+        #   strength_3lift  → DON'T modify load_kg. The analyzer applies
+        #                     the exercise-specific BW factor (bench:0,
+        #                     squat:0.85, deadlift:0.10) at analysis
+        #                     time so per-set load_kg in session.json
+        #                     stays as the raw external bar weight, and
+        #                     the operator can later switch the flag
+        #                     off-line if the wrong protocol was selected.
+        #
+        #   free_exercise   → ADD 100 % of bodyweight (legacy behavior:
+        #                     used for push-ups + weighted vests where
+        #                     the convention is "load_kg is total mass
+        #                     being lifted").
         if self.use_bodyweight_load and self.subject_kg > 0:
-            self.load_kg = float(self.load_kg) + float(self.subject_kg)
+            if self.test == "strength_3lift":
+                # Phase V1.5: strength_3lift handles BW addition at
+                # analysis time via EXERCISE_BW_FACTOR. Leave load_kg
+                # as the raw bar weight here.
+                pass
+            else:
+                self.load_kg = float(self.load_kg) + float(self.subject_kg)
         # Validate multi-set strength config when that test is selected.
         if self.test == "strength_3lift":
             if self.exercise not in ("bench_press", "back_squat", "deadlift"):
@@ -1091,6 +1110,12 @@ class SessionRecorder:
             "target_reps":  cfg.target_reps if cfg.test == "strength_3lift" else None,
             "rest_s":       cfg.rest_s      if cfg.test == "strength_3lift" else None,
             "warmup_set":   cfg.warmup_set  if cfg.test == "strength_3lift" else None,
+            # Phase V1.5 — when True, the analyzer adds an
+            # exercise-specific fraction of bodyweight to load_kg as
+            # the effective 1RM input (see strength_norms.EXERCISE_BW_FACTOR).
+            "strength_use_bw_load": (cfg.use_bodyweight_load
+                                       if cfg.test == "strength_3lift"
+                                       else None),
             # Per-set boundary records — list of dicts with set_idx,
             # t_start_s (relative to record_start), t_end_s, warmup,
             # load_kg, exercise. Empty list when not a multi-set test

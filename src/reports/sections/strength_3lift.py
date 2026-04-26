@@ -151,6 +151,9 @@ class Strength3LiftSection(ReportSection):
                 per_set_chart = ""
 
         # Per-set table
+        # When use_bodyweight_load is enabled, the "하중" column shows
+        # both the raw bar and the effective (bar + α×BW) value so the
+        # operator can verify the calculation at a glance.
         rows_html = ""
         for s in sets:
             wu_tag = " (워밍업)" if s.get("warmup") else ""
@@ -158,10 +161,19 @@ class Strength3LiftSection(ReportSection):
             one_rm_cell = (_fmt_num(s.get("one_rm_kg"), 1, " kg")
                            if not err else f"<i style='color:#999'>{err}</i>")
             rel_ko = _RELIABILITY_KO.get(s.get("reliability", "unreliable"), "—")
+            bar_kg = s.get("load_kg") or 0.0
+            eff_kg = s.get("effective_load_kg") or bar_kg
+            if use_bw and abs(eff_kg - bar_kg) > 0.05:
+                load_cell = (
+                    f"{bar_kg:.1f} kg "
+                    f"<span style='color:#1976D2;'>→ {eff_kg:.1f} kg</span>"
+                )
+            else:
+                load_cell = _fmt_num(bar_kg, 1, " kg")
             rows_html += (
                 f"<tr>"
                 f"<td>{s.get('set_idx', 0) + 1}{wu_tag}</td>"
-                f"<td>{_fmt_num(s.get('load_kg'), 1, ' kg')}</td>"
+                f"<td>{load_cell}</td>"
                 f"<td>{s.get('n_reps', 0)} 회</td>"
                 f"<td>{one_rm_cell}</td>"
                 f"<td>{rel_ko}</td>"
@@ -171,12 +183,23 @@ class Strength3LiftSection(ReportSection):
         sex_ko = {"M": "남성", "F": "여성"}.get(result.get("sex"), "—")
         age = result.get("age")
         bw = result.get("bw_kg")
+        # V1.5 — bodyweight contribution notation
+        use_bw = bool(result.get("use_bodyweight_load", False))
+        bw_factor = float(result.get("bw_factor") or 0.0)
+        bw_note = ""
+        if use_bw:
+            bw_note = (
+                f"<br><span style='color:#1976D2; font-weight:600;'>"
+                f"⚖ 자체중 가산 ON</span> · α = {bw_factor:.2f} · "
+                f"유효하중 = 외부하중 + {bw_factor:.2f} × {bw:.1f} kg "
+                f"= +{bw_factor * bw:.1f} kg")
         ctx_html = (
             f"<div style='font-size:11px; color:#666; margin-bottom:8px;'>"
             f"피험자: {sex_ko} · {age or '—'}세 · {bw:.1f} kg<br>"
             f"운동: <b>{ex_ko}</b> · "
             f"세트 {result.get('n_working_sets', 0)}/{result.get('n_sets', 0)} "
             f"(워밍업 제외 / 전체)"
+            f"{bw_note}"
             f"</div>"
         )
 
@@ -232,6 +255,9 @@ class Strength3LiftSection(ReportSection):
         warning = result.get("warning")
         thresholds = result.get("thresholds_kg")
         skipped = result.get("skipped_grade_reason")
+        # V1.5 — bodyweight contribution flag + factor
+        use_bw = bool(result.get("use_bodyweight_load", False))
+        bw_factor = float(result.get("bw_factor") or 0.0)
 
         from reportlab.platypus import (
             Image, Paragraph, Spacer, Table, TableStyle, KeepTogether,
@@ -274,11 +300,18 @@ class Strength3LiftSection(ReportSection):
         sex_ko = {"M": "남성", "F": "여성"}.get(result.get("sex"), "—")
         age = result.get("age")
         bw = result.get("bw_kg")
+        bw_line = ""
+        if use_bw:
+            bw_line = (
+                f"<br/><font color='#1976D2'>"
+                f"⚖ 자체중 가산 ON · α = {bw_factor:.2f} · "
+                f"유효하중에 +{bw_factor * bw:.1f} kg 가산</font>")
         flow.append(Paragraph(
             f"피험자: {sex_ko} · {age or '—'}세 · {bw:.1f} kg<br/>"
             f"운동: <b>{ex_ko}</b> · "
             f"세트 {result.get('n_working_sets', 0)}/"
-            f"{result.get('n_sets', 0)} (워밍업 제외 / 전체)",
+            f"{result.get('n_sets', 0)} (워밍업 제외 / 전체)"
+            f"{bw_line}",
             ctx_style))
         flow.append(Spacer(1, 6))
 
@@ -354,7 +387,8 @@ class Strength3LiftSection(ReportSection):
             except Exception:
                 pass
 
-        # Per-set table
+        # Per-set table — when BW is on, "하중" column shows
+        # raw bar → effective so the operator can verify the math.
         tbl_rows = [["세트", "하중", "반복", "추정 1RM", "신뢰도"]]
         for s in sets:
             wu_tag = " (워밍업)" if s.get("warmup") else ""
@@ -362,9 +396,15 @@ class Strength3LiftSection(ReportSection):
             one_rm_cell = (_fmt_num(s.get("one_rm_kg"), 1, " kg")
                            if not err else f"({err})")
             rel_ko = _RELIABILITY_KO.get(s.get("reliability", "unreliable"), "—")
+            bar_kg = s.get("load_kg") or 0.0
+            eff_kg = s.get("effective_load_kg") or bar_kg
+            if use_bw and abs(eff_kg - bar_kg) > 0.05:
+                load_str = f"{bar_kg:.1f} → {eff_kg:.1f} kg"
+            else:
+                load_str = _fmt_num(bar_kg, 1, " kg")
             tbl_rows.append([
                 f"{s.get('set_idx', 0) + 1}{wu_tag}",
-                _fmt_num(s.get("load_kg"), 1, " kg"),
+                load_str,
                 f"{s.get('n_reps', 0)} 회",
                 one_rm_cell,
                 rel_ko,

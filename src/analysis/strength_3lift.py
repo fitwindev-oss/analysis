@@ -39,6 +39,7 @@ from src.analysis.encoder import RepMetrics, detect_reps
 from src.analysis.one_rm import estimate_1rm, estimate_1rm_from_sets
 from src.analysis.strength_norms import (
     grade_1rm, EXERCISE_REGION, GRADE_LABELS, VALID_EXERCISES,
+    EXERCISE_BW_FACTOR, effective_load_kg,
 )
 
 
@@ -47,21 +48,30 @@ from src.analysis.strength_norms import (
 # ────────────────────────────────────────────────────────────────────────────
 @dataclass
 class StrengthSetResult:
-    """Per-set analysis: rep count, per-rep metrics, and 1RM estimate."""
-    set_idx:        int
-    warmup:         bool
-    load_kg:        float
-    t_start_s:      float
-    t_end_s:        float
-    n_reps:         int
-    reps:           list = field(default_factory=list)   # list of RepMetrics
-    one_rm_kg:      float = float("nan")     # estimated 1RM for this set
-    one_rm_method:  str = "ensemble"
-    reliability:    str = "unreliable"       # excellent / high / medium / low / unreliable
-    epley_kg:       float = float("nan")
-    brzycki_kg:     float = float("nan")
-    lombardi_kg:    float = float("nan")
-    error:          Optional[str] = None     # populated when reps detection failed
+    """Per-set analysis: rep count, per-rep metrics, and 1RM estimate.
+
+    ``load_kg`` is the RAW external bar weight as recorded.
+    ``effective_load_kg`` is what 1RM estimation actually used:
+        - if use_bodyweight_load=False → effective == bar
+        - if True → effective = bar + EXERCISE_BW_FACTOR × subject_kg
+    Reports surface both so the operator can verify the calculation
+    (especially important for bodyweight-only sessions).
+    """
+    set_idx:           int
+    warmup:            bool
+    load_kg:           float                 # raw bar weight
+    effective_load_kg: float                 # bar + α × BW (V1.5)
+    t_start_s:         float
+    t_end_s:           float
+    n_reps:            int
+    reps:              list = field(default_factory=list)   # list of RepMetrics
+    one_rm_kg:         float = float("nan")     # estimated 1RM for this set
+    one_rm_method:     str = "ensemble"
+    reliability:       str = "unreliable"       # excellent / high / medium / low / unreliable
+    epley_kg:          float = float("nan")
+    brzycki_kg:        float = float("nan")
+    lombardi_kg:       float = float("nan")
+    error:             Optional[str] = None     # populated when reps detection failed
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -80,9 +90,16 @@ class StrengthResult:
     duration_s:     float                   # full session length
 
     # Per-set
-    n_sets:         int                     # total sets recorded
-    n_working_sets: int                     # excluding warmup
+    n_sets:         int = 0                 # total sets recorded
+    n_working_sets: int = 0                 # excluding warmup
     sets:           list = field(default_factory=list)   # list of StrengthSetResult
+
+    # ── Bodyweight contribution (V1.5) ──────────────────────────────────
+    use_bodyweight_load: bool = False       # was BW addition enabled?
+    bw_factor:           float = 0.0        # α applied to subject_kg
+    # When use_bodyweight_load=True and bar_load_kg=0, the entire 1RM
+    # input came from bodyweight; report should warn that this is a
+    # back-calculation rather than a measured lift.
 
     # 1RM aggregate
     best_1rm_kg:    float = float("nan")
@@ -227,6 +244,12 @@ def analyze_strength_3lift(session_dir: str | Path) -> StrengthResult:
     # Force / encoder timeseries
     force = load_force_session(sd)
 
+    # Bodyweight contribution flag — V1.5. The flag's canonical home in
+    # session.json is ``strength_use_bw_load``; older sessions written
+    # before V1.5 are missing the key entirely (treated as False).
+    use_bw = bool(meta.get("strength_use_bw_load", False))
+    bw_factor = EXERCISE_BW_FACTOR.get(exercise, 0.0) if use_bw else 0.0
+
     # Per-set boundary records written by the recorder (V1-D).
     set_records: list[dict] = list(meta.get("sets") or [])
     set_results: list[StrengthSetResult] = []
@@ -234,8 +257,13 @@ def analyze_strength_3lift(session_dir: str | Path) -> StrengthResult:
 
     for rec in set_records:
         t0, t1 = float(rec["t_start_s"]), float(rec["t_end_s"])
-        load_kg = float(rec.get("load_kg") or 0.0)
+        bar_kg = float(rec.get("load_kg") or 0.0)
         warmup = bool(rec.get("warmup", False))
+        # V1.5 — effective load includes BW fraction when enabled.
+        # ``effective_load_kg`` from strength_norms applies the factor.
+        eff_kg = effective_load_kg(
+            exercise=exercise, bar_load_kg=bar_kg,
+            subject_kg=bw_kg, use_bodyweight=use_bw)
 
         _, enc1_w, enc2_w = _slice_force_window(force, t0, t1)
         # The bar encoder is enc1 in the standard rig (left side). When
@@ -248,14 +276,17 @@ def analyze_strength_3lift(session_dir: str | Path) -> StrengthResult:
         srec = StrengthSetResult(
             set_idx=int(rec["set_idx"]),
             warmup=warmup,
-            load_kg=load_kg,
+            load_kg=bar_kg,
+            effective_load_kg=eff_kg,
             t_start_s=t0,
             t_end_s=t1,
             n_reps=n_reps,
         )
 
-        if n_reps > 0 and load_kg > 0:
-            est = estimate_1rm(load_kg, n_reps, method="ensemble")
+        # 1RM input is the EFFECTIVE load — that's what the formulas
+        # actually need to be physically meaningful.
+        if n_reps > 0 and eff_kg > 0:
+            est = estimate_1rm(eff_kg, n_reps, method="ensemble")
             srec.one_rm_kg     = est["one_rm_kg"]
             srec.one_rm_method = est["method"]
             srec.reliability   = est["reliability"]
@@ -263,12 +294,12 @@ def analyze_strength_3lift(session_dir: str | Path) -> StrengthResult:
             srec.brzycki_kg    = est["brzycki_kg"]
             srec.lombardi_kg   = est["lombardi_kg"]
             sets_for_1rm.append({
-                "load_kg": load_kg, "reps": n_reps, "warmup": warmup,
+                "load_kg": eff_kg, "reps": n_reps, "warmup": warmup,
             })
         else:
             if n_reps == 0:
                 srec.error = "no reps detected"
-            elif load_kg <= 0:
+            elif eff_kg <= 0:
                 srec.error = "load_kg not recorded"
 
         set_results.append(srec)
@@ -281,14 +312,16 @@ def analyze_strength_3lift(session_dir: str | Path) -> StrengthResult:
     best_set_idx = best_summary.get("chosen_set_idx")
     # ``best_set_idx`` from estimate_1rm_from_sets is the index into the
     # FILTERED list (warmup excluded). Translate back to the original
-    # set_idx so callers can highlight the right set.
+    # set_idx so callers can highlight the right set. We match on the
+    # EFFECTIVE load (what was fed into estimate_1rm) + reps so the
+    # match is unambiguous when use_bodyweight_load is on.
     if best_set_idx is not None:
         per_set_list = best_summary["per_set"]
         chosen_load_reps = (per_set_list[best_set_idx]["load_kg"],
                             per_set_list[best_set_idx]["reps"])
         for sr in set_results:
             if (not sr.warmup
-                    and abs(sr.load_kg - chosen_load_reps[0]) < 1e-6
+                    and abs(sr.effective_load_kg - chosen_load_reps[0]) < 1e-6
                     and sr.n_reps == chosen_load_reps[1]):
                 best_set_idx = sr.set_idx
                 break
@@ -322,6 +355,8 @@ def analyze_strength_3lift(session_dir: str | Path) -> StrengthResult:
         age=age,
         bw_kg=bw_kg,
         duration_s=float(force.t_s[-1] - force.t_s[0]) if len(force.t_s) else 0.0,
+        use_bodyweight_load=use_bw,
+        bw_factor=bw_factor,
         n_sets=len(set_results),
         n_working_sets=sum(1 for r in set_results if not r.warmup),
         sets=set_results,

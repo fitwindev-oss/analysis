@@ -101,6 +101,7 @@ class TestOptionsPanel(QWidget):
             opts["load_kg"]     = float(self._strength_load.value())
             opts["rest_s"]      = float(self._strength_rest.value())
             opts["warmup_set"]  = self._strength_warmup.isChecked()
+            opts["use_bodyweight_load"] = self._strength_use_bw.isChecked()
         return opts
 
     # ── UI build ───────────────────────────────────────────────────────────
@@ -343,6 +344,21 @@ class TestOptionsPanel(QWidget):
             "체크하면 첫 번째 세트는 웜업 세트로 간주되어 1RM 추정 계산에서 "
             "제외됩니다. 기록은 그대로 보존됩니다.")
         sl.addRow("", self._strength_warmup)
+
+        # V1.5 — bodyweight contribution flag for trainees who can't
+        # add external load (women, beginners, elderly with bodyweight
+        # squats; bench presses don't lift the body so the factor is 0).
+        self._strength_use_bw = QCheckBox(
+            "자체중 가산 (빈 봉 / 자체중 운동 시)")
+        self._strength_use_bw.setChecked(False)
+        self._strength_use_bw.setToolTip(
+            "체크하면 1RM 산출 시 작업하중 = 외부하중 + α × 체중으로 보정됩니다.\n"
+            "  • 벤치프레스: α = 0.0 (체중이 봉에 안 실림)\n"
+            "  • 백스쿼트:   α = 0.85 (하퇴/발 외 신체가 같이 들림)\n"
+            "  • 데드리프트: α = 0.10 (신체 COM 소폭 상승)\n"
+            "외부 하중 없이 자체중만 가능한 피험자(여성/고령자)에게 의미 있는 "
+            "1RM 추정값을 만들기 위한 옵션입니다.")
+        sl.addRow("", self._strength_use_bw)
 
         root.addWidget(self._strength_box)
 

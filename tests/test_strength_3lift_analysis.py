@@ -65,6 +65,7 @@ def _build_synth_session(tmpdir: Path,
                           load_kg: float = 80.0,
                           set_reps: tuple[int, ...] = (8, 10, 8),
                           warmup: bool = False,
+                          use_bodyweight_load: bool = False,
                           fs: float = 100.0) -> Path:
     """Construct a fake session directory under ``tmpdir`` and return
     the path. Includes forces.csv + session.json with set boundaries.
@@ -156,6 +157,8 @@ def _build_synth_session(tmpdir: Path,
         "record_start_wall_s": rec_start_wall,
         "record_start_iso":    "2026-04-27T10:00:00",
         "sets":               sets_meta,
+        # V1.5 — bodyweight contribution flag.
+        "strength_use_bw_load": use_bodyweight_load,
     }
     (sd / "session.json").write_text(
         json.dumps(meta, indent=2), encoding="utf-8")
@@ -363,6 +366,107 @@ def test_dispatcher_routes_strength_3lift():
     from src.analysis.dispatcher import _ANALYZERS, _register_lazy
     _register_lazy()
     assert "strength_3lift" in _ANALYZERS
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# V1.5 — bodyweight contribution flag end-to-end
+# ────────────────────────────────────────────────────────────────────────────
+def test_analyze_bw_load_disabled_does_not_modify_load():
+    """Without use_bodyweight_load, effective load == bar weight."""
+    with tempfile.TemporaryDirectory() as td:
+        sd = _build_synth_session(
+            Path(td), exercise="back_squat", load_kg=80.0,
+            set_reps=(10, 10), use_bodyweight_load=False, warmup=False)
+        r = analyze_strength_3lift(sd)
+    assert r.use_bodyweight_load is False
+    assert r.bw_factor == 0.0
+    for s in r.sets:
+        assert s.effective_load_kg == s.load_kg, (
+            f"set {s.set_idx} load mismatch with BW disabled")
+
+
+def test_analyze_bw_load_squat_adds_85pct():
+    """BW on squat: 60 kg bar × 0.85 × 80 kg subject → effective = 128 kg."""
+    with tempfile.TemporaryDirectory() as td:
+        sd = _build_synth_session(
+            Path(td), bw_kg=80.0, exercise="back_squat",
+            load_kg=60.0, set_reps=(10, 10),
+            use_bodyweight_load=True, warmup=False)
+        r = analyze_strength_3lift(sd)
+    assert r.use_bodyweight_load is True
+    assert abs(r.bw_factor - 0.85) < 1e-9
+    for s in r.sets:
+        assert abs(s.effective_load_kg - 128.0) < 1e-6
+
+
+def test_analyze_bw_load_bench_no_addition():
+    """BW factor for bench is 0 — flag has no effect."""
+    with tempfile.TemporaryDirectory() as td:
+        sd = _build_synth_session(
+            Path(td), bw_kg=80.0, exercise="bench_press",
+            load_kg=70.0, set_reps=(10, 10),
+            use_bodyweight_load=True, warmup=False)
+        r = analyze_strength_3lift(sd)
+    assert r.use_bodyweight_load is True
+    assert r.bw_factor == 0.0
+    for s in r.sets:
+        assert s.effective_load_kg == 70.0
+
+
+def test_analyze_bw_load_bodyweight_only_squat_50kg_woman():
+    """The V1.5 motivating case: 50 kg woman, empty bar, BW squat 12 reps.
+    effective = 0.85 × 50 = 42.5 kg → 1RM ≈ 56-58 kg (ensemble)."""
+    with tempfile.TemporaryDirectory() as td:
+        sd = _build_synth_session(
+            Path(td), sex="F", age_years=30, bw_kg=50.0,
+            exercise="back_squat",
+            load_kg=0.0, set_reps=(12, 12),
+            use_bodyweight_load=True, warmup=False)
+        r = analyze_strength_3lift(sd)
+    # All sets should have effective_load = 42.5
+    for s in r.sets:
+        assert abs(s.effective_load_kg - 42.5) < 1e-6
+    # Best 1RM is in 50-65 kg range (12 reps × 42.5 kg ensemble)
+    assert 50.0 <= r.best_1rm_kg <= 65.0
+    # Grade still gets computed (subject context complete)
+    assert r.grade is not None
+
+
+def test_analyze_bw_load_high_reps_marked_unreliable():
+    """BW squat with 25 reps → reliability = 'unreliable' even though
+    1RM is still computed (per user decision (a))."""
+    with tempfile.TemporaryDirectory() as td:
+        sd = _build_synth_session(
+            Path(td), sex="F", age_years=30, bw_kg=50.0,
+            exercise="back_squat",
+            load_kg=0.0, set_reps=(25, 25),
+            use_bodyweight_load=True, warmup=False)
+        r = analyze_strength_3lift(sd)
+    for s in r.sets:
+        assert s.n_reps == 25
+        assert s.reliability == "unreliable"
+        # 1RM is still produced — not NaN
+        assert not math.isnan(s.one_rm_kg)
+    # The aggregate best_reliability should also reflect this.
+    assert r.best_reliability == "unreliable"
+
+
+def test_analyze_bw_load_meta_field_round_trip():
+    """The strength_use_bw_load meta key is consumed correctly when
+    set both ways."""
+    with tempfile.TemporaryDirectory() as td:
+        sd_off = _build_synth_session(
+            Path(td) / "off", exercise="back_squat", load_kg=60.0,
+            set_reps=(10,), use_bodyweight_load=False, warmup=False)
+        sd_on = _build_synth_session(
+            Path(td) / "on", exercise="back_squat", load_kg=60.0,
+            set_reps=(10,), use_bodyweight_load=True, warmup=False)
+        r_off = analyze_strength_3lift(sd_off)
+        r_on  = analyze_strength_3lift(sd_on)
+    assert r_off.use_bodyweight_load is False
+    assert r_on.use_bodyweight_load is True
+    # 1RM with BW on must be larger (effective load is bigger).
+    assert r_on.best_1rm_kg > r_off.best_1rm_kg
 
 
 # ────────────────────────────────────────────────────────────────────────────

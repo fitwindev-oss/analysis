@@ -282,6 +282,79 @@ def test_grade_labels_exhaustive():
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# V1.5 — bodyweight contribution factor + effective_load_kg
+# ────────────────────────────────────────────────────────────────────────────
+def test_bw_factor_values():
+    """The exact factors agreed upon for V1.5: bench=0, squat=0.85, deadlift=0.10."""
+    from src.analysis.strength_norms import EXERCISE_BW_FACTOR
+    assert EXERCISE_BW_FACTOR["bench_press"] == 0.0
+    assert EXERCISE_BW_FACTOR["back_squat"]  == 0.85
+    assert EXERCISE_BW_FACTOR["deadlift"]    == 0.10
+
+
+def test_effective_load_disabled_returns_bar_only():
+    """With use_bodyweight=False, even a heavy subject contributes nothing."""
+    from src.analysis.strength_norms import effective_load_kg
+    eff = effective_load_kg("back_squat", bar_load_kg=80.0,
+                             subject_kg=90.0, use_bodyweight=False)
+    assert eff == 80.0
+
+
+def test_effective_load_squat_85pct():
+    """Squat: 60 kg bar + 0.85 × 80 kg = 60 + 68 = 128 kg."""
+    from src.analysis.strength_norms import effective_load_kg
+    eff = effective_load_kg("back_squat", bar_load_kg=60.0,
+                             subject_kg=80.0, use_bodyweight=True)
+    assert abs(eff - (60.0 + 0.85 * 80.0)) < 1e-9
+
+
+def test_effective_load_bench_zero_factor():
+    """Bench press: BW factor = 0 → enabling the flag is a no-op."""
+    from src.analysis.strength_norms import effective_load_kg
+    eff = effective_load_kg("bench_press", bar_load_kg=70.0,
+                             subject_kg=90.0, use_bodyweight=True)
+    assert eff == 70.0
+
+
+def test_effective_load_deadlift_10pct():
+    """Deadlift: 100 kg bar + 0.10 × 80 kg = 108."""
+    from src.analysis.strength_norms import effective_load_kg
+    eff = effective_load_kg("deadlift", bar_load_kg=100.0,
+                             subject_kg=80.0, use_bodyweight=True)
+    assert abs(eff - 108.0) < 1e-9
+
+
+def test_effective_load_bw_only_squat():
+    """50 kg woman, empty bar (0 kg) on squat → effective = 0.85 × 50 = 42.5 kg.
+    This is the V1.5 motivating case: meaningful 1RM input from bodyweight alone."""
+    from src.analysis.strength_norms import effective_load_kg
+    eff = effective_load_kg("back_squat", bar_load_kg=0.0,
+                             subject_kg=50.0, use_bodyweight=True)
+    assert abs(eff - 42.5) < 1e-9
+
+
+def test_effective_load_handles_missing_subject_kg():
+    """No subject weight → just bar weight regardless of flag."""
+    from src.analysis.strength_norms import effective_load_kg
+    assert effective_load_kg("back_squat", 80.0, 0.0, True) == 80.0
+    assert effective_load_kg("back_squat", 80.0, None, True) == 80.0
+
+
+def test_effective_load_unknown_exercise_falls_back_to_zero_factor():
+    """Unknown exercise key shouldn't crash — silently treats as factor 0."""
+    from src.analysis.strength_norms import effective_load_kg
+    eff = effective_load_kg("snatch", bar_load_kg=60.0,
+                             subject_kg=80.0, use_bodyweight=True)
+    assert eff == 60.0
+
+
+def test_effective_load_case_insensitive_exercise():
+    from src.analysis.strength_norms import effective_load_kg
+    eff = effective_load_kg("BACK_SQUAT", 60.0, 80.0, True)
+    assert abs(eff - (60.0 + 0.85 * 80.0)) < 1e-9
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Direct runner
 # ────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":

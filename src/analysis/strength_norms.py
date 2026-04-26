@@ -83,6 +83,49 @@ EXERCISE_REGION: dict[str, str] = {
 
 VALID_EXERCISES: tuple[str, ...] = tuple(EXERCISE_REGION.keys())
 
+# Bodyweight contribution per exercise (Phase V1.5).
+#
+# When ``use_bodyweight_load`` is enabled at recording time, the analyzer
+# computes an "effective load" that includes a fraction of the subject's
+# bodyweight to better reflect what the muscle group actually has to
+# lift. Source rationale:
+#
+#   bench_press → 0.0    Bar is the only mass moving up; the body stays
+#                        on the bench. Even with a heavy subject the
+#                        push-up muscles (chest/triceps) only see what's
+#                        on the bar.
+#   back_squat  → 0.85   Most of the body rises with the bar. Only the
+#                        lower legs + feet (≈ 13-15 % of BW) stay
+#                        stationary. So the legs lift bar + 0.85 × BW.
+#   deadlift    → 0.10   Bar lifted from the floor; the body's COM
+#                        rises ~30-40 cm. The conventional "pure"
+#                        deadlift 1RM is bar-only, but a small fraction
+#                        of BW is acknowledged for completeness.
+#
+# These factors apply ONLY when ``use_bodyweight_load`` is True for the
+# session. The default measurement protocol uses raw bar weight.
+EXERCISE_BW_FACTOR: dict[str, float] = {
+    "bench_press": 0.00,
+    "back_squat":  0.85,
+    "deadlift":    0.10,
+}
+
+
+def effective_load_kg(exercise: str, bar_load_kg: float,
+                      subject_kg: float, use_bodyweight: bool) -> float:
+    """Return the effective load = bar + α × bodyweight when enabled.
+
+    With ``use_bodyweight=False`` (the default for traditional lifters)
+    this is just the bar weight. With it enabled, the exercise's BW
+    factor from :data:`EXERCISE_BW_FACTOR` is applied so subjects who
+    can only lift their own body still get a meaningful 1RM input.
+    """
+    bar = float(bar_load_kg or 0.0)
+    if not use_bodyweight or subject_kg is None or subject_kg <= 0:
+        return bar
+    factor = EXERCISE_BW_FACTOR.get(exercise.lower(), 0.0)
+    return bar + factor * float(subject_kg)
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # Norm table object
