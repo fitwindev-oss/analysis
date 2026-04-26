@@ -32,13 +32,14 @@ def _register_lazy():
     """Populate _ANALYZERS on first use (avoids heavy import at module load)."""
     if _ANALYZERS:
         return
-    from .balance       import analyze_balance_file
-    from .cmj           import analyze_cmj_file
-    from .squat         import analyze_squat_file
-    from .encoder       import analyze_encoder_file
-    from .reaction      import analyze_reaction_file
-    from .proprio       import analyze_proprio_file
-    from .free_exercise import analyze_free_exercise_file
+    from .balance        import analyze_balance_file
+    from .cmj            import analyze_cmj_file
+    from .squat          import analyze_squat_file
+    from .encoder        import analyze_encoder_file
+    from .reaction       import analyze_reaction_file
+    from .proprio        import analyze_proprio_file
+    from .free_exercise  import analyze_free_exercise_file
+    from .strength_3lift import analyze_strength_3lift_file
 
     _ANALYZERS.update({
         "balance_eo":     analyze_balance_file,
@@ -50,6 +51,7 @@ def _register_lazy():
         "reaction":       analyze_reaction_file,
         "proprio":        analyze_proprio_file,
         "free_exercise":  analyze_free_exercise_file,
+        "strength_3lift": analyze_strength_3lift_file,
     })
 
 
