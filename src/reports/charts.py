@@ -1154,6 +1154,161 @@ def make_strength_per_region_bars(regions: list[dict],
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Squat CoP safety path (Phase V5)
+# ─────────────────────────────────────────────────────────────────────────────
+def make_squat_cop_safety(reps: list[dict],
+                           quiet_x_mm: Optional[float],
+                           quiet_y_mm: Optional[float],
+                           width_in: float = 5.5,
+                           height_in: float = 5.0) -> bytes:
+    """Per-rep AP drift / ML drift max scatter on top of three nested
+    safety bands (1=tight green, 2=amber, 3=loose red).
+
+    Each rep shows up as a single dot positioned at
+    ``(ml_drift_max_mm, ap_drift_mm)`` so the radial distance from
+    origin captures both axes of risk. Reps inside the green box are
+    grade 1; outside the red box are flagged.
+    """
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+
+    # Concentric bands (must match _COP_SAFETY_BANDS in src/analysis/squat.py).
+    bands = [
+        # (ap_min, ap_max, ml_max, color, alpha, label, edgecolor)
+        (-55.0, 25.0, 55.0, "#FFEBEE", 0.55, "보통 (3등급)", "#C62828"),
+        (-40.0, 15.0, 40.0, "#FFF8E1", 0.65, "양호 (2등급)", "#F9A825"),
+        (-25.0,  5.0, 25.0, "#E8F5E9", 0.85, "안전 (1등급)", "#2E7D32"),
+    ]
+    for ap_min, ap_max, ml_max, color, alpha, label, edge in bands:
+        rect = mpatches.Rectangle(
+            (-ml_max, ap_min), 2 * ml_max, ap_max - ap_min,
+            facecolor=color, edgecolor=edge, linewidth=1.0,
+            alpha=alpha, zorder=1)
+        ax.add_patch(rect)
+        # Label at top-right corner
+        ax.text(ml_max - 2, ap_max - 3, label,
+                ha="right", va="top",
+                fontsize=8, color=edge, fontweight="bold",
+                zorder=2)
+
+    # Reference axes
+    ax.axhline(0, color="#9E9E9E", linewidth=0.6, linestyle="--", zorder=0)
+    ax.axvline(0, color="#9E9E9E", linewidth=0.6, linestyle="--", zorder=0)
+
+    # Per-rep scatter
+    n_in_each_grade = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+    for r in reps:
+        ap = r.get("cop_ap_drift_mm")
+        ml = r.get("cop_ml_drift_max_mm")
+        g = r.get("cop_safety_grade")
+        if ap is None or ml is None:
+            continue
+        color = (
+            "#26A69A" if g == 1 else
+            "#9CCC65" if g == 2 else
+            "#FBC02D" if g == 3 else
+            "#FFA726" if g == 4 else
+            "#EF5350"
+        )
+        # Show both ML signs symmetrically — the rep's max ML deviation
+        # could be left OR right; without storing the side we plot the
+        # absolute value (so dots stay on the right half by convention).
+        ax.scatter([float(ml)], [float(ap)], s=80,
+                    color=color, edgecolor="black", linewidth=0.8,
+                    zorder=3, alpha=0.85)
+        # Annotate rep number
+        ax.text(float(ml) + 1.5, float(ap), f"{int(r.get('idx', 0)) + 1}",
+                fontsize=8, color="#212121",
+                va="center", zorder=4)
+        if g is not None:
+            n_in_each_grade[int(g)] = n_in_each_grade.get(int(g), 0) + 1
+
+    # Limits — ensure the loosest band is fully visible
+    ax.set_xlim(-65, 80)
+    ax.set_ylim(-70, 35)
+    ax.set_xlabel("ML 드리프트 최대 (mm) — 왼/오 흔들림",
+                   fontsize=9, color="#666")
+    ax.set_ylabel("AP 드리프트 평균 (mm) — 음수=뒤꿈치, 양수=발끝",
+                   fontsize=9, color="#666")
+    ax.set_title("CoP 안전 경로 — rep별 분포",
+                 fontsize=11, loc="left", color="#1976D2")
+    ax.grid(True, linestyle=":", alpha=0.3)
+    ax.set_aspect("auto")
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
+def make_lr_asymmetry_bars(reps: list[dict],
+                            warning_pct: float = 10.0,
+                            caution_pct: float = 5.0,
+                            width_in: float = 7.5,
+                            height_in: float = 2.7) -> bytes:
+    """Per-rep L/R impulse asymmetry bars for both ECC + CON phases.
+
+    Two grouped bars per rep: dark bar = eccentric, light bar =
+    concentric. Horizontal reference lines at the caution + warning
+    thresholds make outliers visually obvious.
+    """
+    setup_korean_fonts()
+    import matplotlib.pyplot as plt
+
+    if not reps:
+        fig, ax = plt.subplots(figsize=(width_in, height_in),
+                               facecolor="white")
+        ax.text(0.5, 0.5, "측정 데이터 없음", ha="center", va="center",
+                fontsize=14, color="#999")
+        ax.set_xticks([]); ax.set_yticks([])
+        return _fig_to_png_bytes(fig)
+
+    n = len(reps)
+    xs = np.arange(1, n + 1)
+    ecc_vals = [float(r.get("impulse_asym_ecc_pct") or 0.0) for r in reps]
+    con_vals = [float(r.get("impulse_asym_con_pct") or 0.0) for r in reps]
+
+    def _bar_color(v):
+        v = abs(v)
+        if v >= warning_pct:
+            return "#EF5350"
+        if v >= caution_pct:
+            return "#FFA726"
+        return "#9CCC65"
+
+    fig, ax = plt.subplots(figsize=(width_in, height_in), facecolor="white")
+    width = 0.38
+    ecc_colors = [_bar_color(v) for v in ecc_vals]
+    con_colors = [_bar_color(v) for v in con_vals]
+    ax.bar(xs - width / 2, ecc_vals, width=width,
+           color=ecc_colors, edgecolor="#212121",
+           linewidth=0.8, label="하강 (eccentric)")
+    ax.bar(xs + width / 2, con_vals, width=width,
+           color=con_colors, edgecolor="#212121",
+           linewidth=0.8, hatch="///", label="상승 (concentric)")
+
+    # Reference lines
+    ax.axhline(caution_pct, color="#F9A825", linestyle="--",
+               linewidth=1.0, label=f"주의 ≥ {caution_pct:.0f}%")
+    ax.axhline(warning_pct, color="#C62828", linestyle="--",
+               linewidth=1.0, label=f"경고 ≥ {warning_pct:.0f}%")
+    ax.set_xticks(xs)
+    ax.set_xticklabels([str(i) for i in xs])
+    ax.set_xlabel("Rep #", fontsize=9, color="#666")
+    ax.set_ylabel("좌우 충격량 비대칭 (%)", fontsize=10)
+    ax.set_title("좌우 충격량 비대칭 (하강 / 상승 분리)",
+                 fontsize=11, loc="left", color="#1976D2")
+    ax.legend(fontsize=8, loc="upper right",
+              ncol=2, framealpha=0.9)
+    ax.set_ylim(0, max(max(ecc_vals + con_vals + [warning_pct]) * 1.3,
+                        warning_pct * 1.5))
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(True, axis="y", linestyle=":", alpha=0.4)
+    fig.tight_layout()
+    return _fig_to_png_bytes(fig)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SSC — CMJ vs SJ comparison (Phase V4)
 # ─────────────────────────────────────────────────────────────────────────────
 _SSC_GRADE_COLORS: dict[int, str] = {

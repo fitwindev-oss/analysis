@@ -77,6 +77,23 @@ class SquatRep:
     # impulse on one side only.
     impulse_asym_ecc_pct: Optional[float] = None
     impulse_asym_con_pct: Optional[float] = None
+    # ── V5: Phase-specific asymmetry warning levels ────────────────────
+    # Plan §3-E: ≥ 10 % asymmetry is a safety flag. We expose a
+    # 3-level severity ('ok' / 'caution' / 'warning') per phase so the
+    # report can colour-code per-rep table cells without recomputing.
+    impulse_asym_ecc_level: Optional[str] = None    # 'ok'/'caution'/'warning'
+    impulse_asym_con_level: Optional[str] = None
+    # ── V5: CoP safety path analysis ───────────────────────────────────
+    # Plan §3-B. AP drift = mean cop_y during rep - quiet_stance_y.
+    # Negative = rear-foot bias (safe / desired); positive = forward-toe
+    # bias (knee strain risk). ML drift max = peak |cop_x - quiet_x|
+    # during the rep — quantifies lateral wobble.
+    cop_ap_drift_mm:    Optional[float] = None
+    cop_ml_drift_max_mm: Optional[float] = None
+    cop_safety_grade:   Optional[int] = None        # 1-5
+    cop_safety_warning: Optional[str] = None        # 'forward_lean' /
+                                                    # 'lateral_drift' /
+                                                    # 'rearfoot_excessive' / None
     # RFD metrics — force-onset-aligned intervals during concentric phase.
     rfd_n_s:        dict = field(default_factory=dict)   # {20: N/s, 40: ..., ...}
     peak_rfd_n_s:   Optional[float] = None
@@ -113,6 +130,19 @@ class SquatResult:
     mean_impulse_asym_con_pct: float = 0.0
     mean_peak_rfd_n_s: float = 0.0
     mean_vrt_ms:     Optional[float] = None
+
+    # ── V5: CoP safety path + L/R asymmetry session-level rollups ──────
+    quiet_stance_x_mm:   Optional[float] = None      # mid-foot reference
+    quiet_stance_y_mm:   Optional[float] = None
+    mean_cop_ap_drift_mm:        float = 0.0
+    mean_cop_ml_drift_max_mm:    float = 0.0
+    cop_safety_grade:   Optional[int] = None         # session-level worst grade
+    # Per-rep warning counts (count of reps with each warning kind).
+    cop_safety_warning_counts: dict = field(default_factory=dict)
+    # L/R asymmetry — count of reps that breached the 10 % warning line
+    # in either phase. Used by the report to flag laterality issues.
+    n_reps_asym_warning_ecc: int = 0
+    n_reps_asym_warning_con: int = 0
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -354,6 +384,131 @@ def _compute_impulse_asymmetry(b1_total: np.ndarray, b2_total: np.ndarray,
     return asym_ecc, asym_con
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# V5 — CoP safety path + L/R asymmetry warnings (plan §3-B and §3-E)
+# ─────────────────────────────────────────────────────────────────────────────
+# Asymmetry warning thresholds (% impulse). Plan §3-E flags ≥ 10 %.
+ASYM_CAUTION_PCT = 5.0
+ASYM_WARNING_PCT = 10.0
+
+
+def asymmetry_level(asym_pct: Optional[float]) -> str:
+    """Map an L/R impulse asymmetry % to a 3-level severity tag.
+
+    Returns 'ok' / 'caution' / 'warning'. None input → 'ok'."""
+    if asym_pct is None:
+        return "ok"
+    v = abs(float(asym_pct))
+    if v >= ASYM_WARNING_PCT:
+        return "warning"
+    if v >= ASYM_CAUTION_PCT:
+        return "caution"
+    return "ok"
+
+
+# CoP safety thresholds (mm). These are tuned values; the planning PDF
+# explicitly defers final boundaries to in-clinic experimental
+# validation ("실험을 통해 안전 경로 범위 설정 필요"). The chosen values
+# match common biomechanical heuristics — slight rear-foot bias is
+# desirable, forward-toe drift loads the knee, lateral drift > 25 mm
+# indicates uncontrolled wobble.
+_COP_SAFETY_BANDS: list[tuple[float, float, float, int]] = [
+    # (ap_min, ap_max, ml_max, grade) — drift inside band → that grade
+    (-25.0,  +5.0, 25.0, 1),    # 안전
+    (-40.0, +15.0, 40.0, 2),    # 양호
+    (-55.0, +25.0, 55.0, 3),    # 보통
+    # outside the widest band → grade 4 (caution) or 5 (risk) below.
+]
+
+
+def classify_cop_safety(ap_drift_mm: float,
+                         ml_drift_max_mm: float
+                         ) -> tuple[int, Optional[str]]:
+    """Classify a per-rep CoP-drift pair into a 1-5 safety grade.
+
+    Returns ``(grade, warning_kind)`` where ``warning_kind`` is one of:
+        - None              — no concern (grades 1-2)
+        - 'forward_lean'    — AP drift toward toes (knee strain)
+        - 'rearfoot_excessive' — AP drift extreme rearward (heel lift /
+          backward fall risk)
+        - 'lateral_drift'   — ML drift > tolerance
+    """
+    ap = float(ap_drift_mm) if ap_drift_mm is not None else 0.0
+    ml = float(ml_drift_max_mm) if ml_drift_max_mm is not None else 0.0
+
+    # Walk safety bands from tightest to loosest.
+    for ap_min, ap_max, ml_max, grade in _COP_SAFETY_BANDS:
+        if ap_min <= ap <= ap_max and ml <= ml_max:
+            return grade, None
+
+    # Outside grade-3 band → grade 4 or 5 depending on severity.
+    # Pick the warning class that drives the breach hardest.
+    grade = 4
+    warning: Optional[str] = None
+    # Tighter check: if breach is large, escalate to 5.
+    if ap > 25.0:
+        warning = "forward_lean"
+        if ap > 50.0:
+            grade = 5
+    elif ap < -55.0:
+        warning = "rearfoot_excessive"
+        if ap < -90.0:
+            grade = 5
+    if ml > 55.0:
+        warning = "lateral_drift" if warning is None else warning
+        if ml > 100.0:
+            grade = 5
+    return grade, warning
+
+
+def compute_quiet_stance(force, fs: float, n_reps_idx,
+                          pre_window_s: float = 1.0
+                          ) -> tuple[Optional[float], Optional[float]]:
+    """Estimate the subject's quiet-stance CoP from the pre-rep window.
+
+    Looks at the ``pre_window_s`` seconds BEFORE the first rep starts
+    and returns the mean (cop_x, cop_y) ignoring NaN samples. Returns
+    (None, None) if no clean window is available.
+    """
+    if not n_reps_idx:
+        return None, None
+    i_first = int(n_reps_idx[0][0])
+    n_pre = int(pre_window_s * fs)
+    i0 = max(0, i_first - n_pre)
+    if i0 >= i_first:
+        return None, None
+    cx = force.cop_x[i0:i_first]
+    cy = force.cop_y[i0:i_first]
+    valid = (~np.isnan(cx)) & (~np.isnan(cy))
+    if not valid.any():
+        return None, None
+    return float(cx[valid].mean()), float(cy[valid].mean())
+
+
+def compute_cop_safety_per_rep(force,
+                                i_start: int, i_end: int,
+                                quiet_x: Optional[float],
+                                quiet_y: Optional[float]
+                                ) -> tuple[Optional[float], Optional[float]]:
+    """Per-rep AP drift + ML drift max relative to quiet stance.
+
+    ``quiet_x`` / ``quiet_y`` come from ``compute_quiet_stance``. When
+    either is None (no clean reference window), returns (None, None).
+    """
+    if quiet_x is None or quiet_y is None:
+        return None, None
+    cx = force.cop_x[i_start:i_end + 1]
+    cy = force.cop_y[i_start:i_end + 1]
+    valid = (~np.isnan(cx)) & (~np.isnan(cy))
+    if not valid.any():
+        return None, None
+    cx_v = cx[valid]
+    cy_v = cy[valid]
+    ap_drift = float(cy_v.mean() - quiet_y)
+    ml_drift = float(np.max(np.abs(cx_v - quiet_x)))
+    return ap_drift, ml_drift
+
+
 def _load_squat_stim_log(session_dir) -> tuple[list[dict], Optional[float]]:
     """Load stimulus events for VRT computation.
 
@@ -481,6 +636,12 @@ def analyze_squat(force: ForceSession,
 
     stim_events, stim_rec_start = _load_squat_stim_log(force.session_dir)
 
+    # ── V5 — Quiet-stance CoP reference for safety analysis ─────────────
+    # The ~1 s before the first rep starts gives a stable CoP that we
+    # use as the subject's mid-foot reference. AP/ML drift during each
+    # rep is then measured relative to this reference.
+    quiet_x, quiet_y = compute_quiet_stance(force, fs, reps_idx)
+
     # Per-rep metrics
     rep_list: list[SquatRep] = []
     for k, (i_s, i_b, i_e) in enumerate(reps_idx):
@@ -573,6 +734,16 @@ def analyze_squat(force: ForceSession,
             vrt_ms = _match_vrt_for_rep(
                 stim_events, stim_rec_start,
                 t_bottom_s=float(t[i_b]), onset_t_s=onset_t)
+        # ── V5 — CoP safety + asymmetry warning levels ────────────────
+        ap_drift, ml_drift_max = compute_cop_safety_per_rep(
+            force, i_s, i_e, quiet_x, quiet_y)
+        cop_safety_grade_v: Optional[int] = None
+        cop_safety_warning_v: Optional[str] = None
+        if ap_drift is not None and ml_drift_max is not None:
+            cop_safety_grade_v, cop_safety_warning_v = classify_cop_safety(
+                ap_drift, ml_drift_max)
+        ecc_level = asymmetry_level(asym_ecc)
+        con_level = asymmetry_level(asym_con)
 
         rep_list.append(SquatRep(
             idx=k,
@@ -594,6 +765,12 @@ def analyze_squat(force: ForceSession,
             tempo_ratio=tempo_ratio,
             impulse_asym_ecc_pct=asym_ecc,
             impulse_asym_con_pct=asym_con,
+            impulse_asym_ecc_level=ecc_level,
+            impulse_asym_con_level=con_level,
+            cop_ap_drift_mm=ap_drift,
+            cop_ml_drift_max_mm=ml_drift_max,
+            cop_safety_grade=cop_safety_grade_v,
+            cop_safety_warning=cop_safety_warning_v,
             rfd_n_s={str(k): v for k, v in (rfd_map or {}).items()},
             peak_rfd_n_s=peak_rfd,
             vrt_ms=vrt_ms,
@@ -630,6 +807,34 @@ def analyze_squat(force: ForceSession,
             [r.peak_rfd_n_s for r in rep_list])
         vrts = [r.vrt_ms for r in rep_list if r.vrt_ms is not None]
         result.mean_vrt_ms = float(np.mean(vrts)) if vrts else None
+
+        # ── V5 — session rollups for CoP safety + asymmetry ──────────
+        result.quiet_stance_x_mm = quiet_x
+        result.quiet_stance_y_mm = quiet_y
+        result.mean_cop_ap_drift_mm = _mean_not_none(
+            [r.cop_ap_drift_mm for r in rep_list])
+        result.mean_cop_ml_drift_max_mm = _mean_not_none(
+            [r.cop_ml_drift_max_mm for r in rep_list])
+        # Session-level safety grade = WORST (highest number) per-rep
+        # grade, so a single risky rep surfaces in the report card.
+        rep_grades = [r.cop_safety_grade for r in rep_list
+                      if r.cop_safety_grade is not None]
+        result.cop_safety_grade = (max(rep_grades)
+                                    if rep_grades else None)
+        # Count each warning kind
+        warn_counts: dict[str, int] = {}
+        for r in rep_list:
+            if r.cop_safety_warning:
+                warn_counts[r.cop_safety_warning] = (
+                    warn_counts.get(r.cop_safety_warning, 0) + 1)
+        result.cop_safety_warning_counts = warn_counts
+        # Asymmetry warning rep counts
+        result.n_reps_asym_warning_ecc = sum(
+            1 for r in rep_list
+            if r.impulse_asym_ecc_level == "warning")
+        result.n_reps_asym_warning_con = sum(
+            1 for r in rep_list
+            if r.impulse_asym_con_level == "warning")
     return result
 
 
