@@ -32,6 +32,8 @@ TEST_KO = {
     "encoder":        "엔코더 (바)",
     "reaction":       "반응 시간",
     "proprio":        "고유감각",
+    "free_exercise":  "자유 운동",
+    "strength_3lift": "전신 근력 (3대)",
 }
 
 

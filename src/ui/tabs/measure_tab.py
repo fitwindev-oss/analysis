@@ -275,6 +275,11 @@ class MeasureTab(QWidget):
         sc("Space",      self._shortcut_reaction_random)
         # Squat VRT cue — U = "Up"
         sc("U",          self._shortcut_squat_vrt_cue)
+        # Multi-set strength assessment (Phase V1-E)
+        sc("S",          self._shortcut_set_end)        # Set end
+        sc("E",          self._shortcut_session_end)    # End session
+        sc("P",          self._shortcut_rest_pause)     # Pause/resume rest
+        sc("N",          self._shortcut_rest_skip)      # Next set (skip rest)
 
     def _shortcut_start(self) -> None:
         if self._btn_start.isEnabled():
@@ -301,6 +306,23 @@ class MeasureTab(QWidget):
     def _shortcut_squat_vrt_cue(self) -> None:
         if self._btn_vrt_cue.isEnabled():
             self._fire_manual("squat_ascent")
+
+    # ── Multi-set strength shortcuts (Phase V1-E) ─────────────────────────
+    def _shortcut_set_end(self) -> None:
+        if self._btn_set_end.isEnabled():
+            self._on_set_end_clicked()
+
+    def _shortcut_session_end(self) -> None:
+        if self._btn_session_end.isEnabled():
+            self._on_session_end_clicked()
+
+    def _shortcut_rest_pause(self) -> None:
+        if self._btn_rest_pause.isEnabled():
+            self._on_rest_pause_clicked()
+
+    def _shortcut_rest_skip(self) -> None:
+        if self._btn_rest_skip.isEnabled():
+            self._on_rest_skip_clicked()
 
     def _build_sidebar(self) -> QWidget:
         """Left sidebar — mode / test options / protocol queue / manual / log.
@@ -403,6 +425,64 @@ class MeasureTab(QWidget):
         self._vrt_box.setVisible(False)
         lay.addWidget(self._vrt_box)
 
+        # ── Multi-set strength assessment (Phase V1-E) ─────────────────
+        # Visible only for ``strength_3lift``. Two layouts share the
+        # same group box, swapped by _refresh_strength_controls based
+        # on the current state.phase:
+        #   recording        → "세트 X / N" + "세트 종료" + "종료"
+        #   inter_set_rest   → countdown + pause/resume + skip + end
+        self._strength_box = QGroupBox("3대 운동 다세트")
+        sblay = QVBoxLayout(self._strength_box)
+        sblay.setSpacing(6)
+        # Set indicator label (always visible inside the box)
+        self._lbl_set_indicator = QLabel("준비 중")
+        self._lbl_set_indicator.setStyleSheet(
+            "QLabel { color:#FFEB3B; font-weight:bold; font-size:13px; "
+            "padding:4px; }")
+        self._lbl_set_indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sblay.addWidget(self._lbl_set_indicator)
+        # Buttons row 1 — recording-phase controls
+        rec_row = QHBoxLayout()
+        rec_row.setSpacing(6)
+        self._btn_set_end = QPushButton("✓ 세트 종료 (S)")
+        self._btn_set_end.setProperty("kind", "primary")
+        self._btn_set_end.setMinimumHeight(48)
+        self._btn_set_end.setToolTip(
+            "현재 세트를 종료하고 휴식 단계로 전환합니다 (단축키 S).\n"
+            "마지막 세트일 경우 측정이 완료됩니다.")
+        self._btn_set_end.clicked.connect(self._on_set_end_clicked)
+        self._btn_set_end.setEnabled(False)
+        rec_row.addWidget(self._btn_set_end, 2)
+        self._btn_session_end = QPushButton("◼ 세션 종료 (E)")
+        self._btn_session_end.setMinimumHeight(48)
+        self._btn_session_end.setToolTip(
+            "남은 세트를 건너뛰고 지금까지의 데이터로 측정을 종료합니다.\n"
+            "취소와 달리 기록은 유지됩니다.")
+        self._btn_session_end.clicked.connect(self._on_session_end_clicked)
+        self._btn_session_end.setEnabled(False)
+        rec_row.addWidget(self._btn_session_end, 1)
+        sblay.addLayout(rec_row)
+        # Buttons row 2 — rest-phase controls
+        rest_row = QHBoxLayout()
+        rest_row.setSpacing(6)
+        self._btn_rest_pause = QPushButton("⏸ 일시정지")
+        self._btn_rest_pause.setMinimumHeight(40)
+        self._btn_rest_pause.setToolTip(
+            "휴식 카운트다운을 일시정지합니다. 다시 누르면 재개합니다.")
+        self._btn_rest_pause.clicked.connect(self._on_rest_pause_clicked)
+        self._btn_rest_pause.setEnabled(False)
+        self._btn_rest_skip = QPushButton("⏭ 다음 세트 시작")
+        self._btn_rest_skip.setMinimumHeight(40)
+        self._btn_rest_skip.setToolTip(
+            "휴식을 건너뛰고 다음 세트를 즉시 시작합니다.")
+        self._btn_rest_skip.clicked.connect(self._on_rest_skip_clicked)
+        self._btn_rest_skip.setEnabled(False)
+        rest_row.addWidget(self._btn_rest_pause, 1)
+        rest_row.addWidget(self._btn_rest_skip, 1)
+        sblay.addLayout(rest_row)
+        self._strength_box.setVisible(False)
+        lay.addWidget(self._strength_box)
+
         # Log
         log_box = QGroupBox("로그")
         llay = QVBoxLayout(log_box)
@@ -494,12 +574,97 @@ class MeasureTab(QWidget):
         self._manual_box.setVisible(test_key == "reaction")
         # Squat / overhead squat expose the VRT cue button (Phase S1d).
         self._vrt_box.setVisible(test_key in ("squat", "overhead_squat"))
+        # Strength 3-lift exposes the multi-set control box (Phase V1-E).
+        self._strength_box.setVisible(test_key == "strength_3lift")
         # T6: force a relayout pass — without this, switching modes
         # while the window is at minimum width can leave option boxes
         # partially clipped until the next resize event.
         self.updateGeometry()
         if hasattr(self, "_main_split") and self._main_split is not None:
             self._main_split.refresh()
+
+    # ── Multi-set strength assessment handlers (Phase V1-E) ────────────────
+    def _on_set_end_clicked(self) -> None:
+        """Operator pressed "세트 종료" — forward to the recorder.
+        No-op when no recording or when not strength_3lift."""
+        if self._worker is not None:
+            self._worker.end_set()
+            self._append_log("[ui] set end requested")
+
+    def _on_session_end_clicked(self) -> None:
+        """Operator pressed "세션 종료" — finalize early, preserving data
+        already recorded. Distinct from cancel (which discards)."""
+        if self._worker is not None:
+            self._worker.end_session()
+            self._append_log("[ui] session end requested")
+
+    def _on_rest_pause_clicked(self) -> None:
+        """Toggle pause/resume on the inter-set rest countdown."""
+        if self._worker is None:
+            return
+        # Use the button's current label to decide which way to toggle.
+        # _refresh_strength_controls keeps the label in sync with state.
+        if self._btn_rest_pause.text().startswith("▶"):
+            self._worker.resume_rest()
+            self._append_log("[ui] rest resumed")
+        else:
+            self._worker.pause_rest()
+            self._append_log("[ui] rest paused")
+
+    def _on_rest_skip_clicked(self) -> None:
+        if self._worker is not None:
+            self._worker.skip_rest()
+            self._append_log("[ui] rest skipped")
+
+    def _refresh_strength_controls(self, st: RecorderState) -> None:
+        """Drive the strength-box buttons + indicator from RecorderState.
+
+        Called from _on_state on every state update. Decides which row
+        of buttons is enabled/labelled based on the current phase.
+        """
+        if not self._strength_box.isVisible():
+            return
+        # Indicator label
+        n = max(st.n_sets, 1)
+        idx = st.current_set_idx + 1   # 1-based for display
+        if st.phase == "recording":
+            warmup_tag = ""
+            opts = self._current_opts or {}
+            if opts.get("warmup_set") and st.current_set_idx == 0:
+                warmup_tag = "  (워밍업)"
+            self._lbl_set_indicator.setText(
+                f"● 세트 {idx} / {n} 측정 중{warmup_tag}")
+            self._lbl_set_indicator.setStyleSheet(
+                "QLabel { color:#FF5252; font-weight:bold; font-size:14px; "
+                "padding:4px; }")
+            self._btn_set_end.setEnabled(True)
+            self._btn_session_end.setEnabled(True)
+            self._btn_rest_pause.setEnabled(False)
+            self._btn_rest_skip.setEnabled(False)
+            self._btn_rest_pause.setText("⏸ 일시정지")
+        elif st.phase == "inter_set_rest":
+            self._lbl_set_indicator.setText(
+                f"⏱ 세트 {idx} / {n} 종료   휴식 {st.rest_remaining_s:.1f} s   "
+                f"다음: 세트 {min(idx + 1, n)} / {n}")
+            self._lbl_set_indicator.setStyleSheet(
+                "QLabel { color:#FFD54F; font-weight:bold; font-size:14px; "
+                "padding:4px; }")
+            self._btn_set_end.setEnabled(False)
+            self._btn_session_end.setEnabled(True)
+            self._btn_rest_pause.setEnabled(True)
+            self._btn_rest_skip.setEnabled(True)
+            self._btn_rest_pause.setText("▶ 재개" if st.rest_paused
+                                          else "⏸ 일시정지")
+        else:
+            # idle / wait / countdown / done / cancelled — disable all
+            # multi-set controls until recording starts.
+            self._lbl_set_indicator.setText("측정 시작 대기")
+            self._lbl_set_indicator.setStyleSheet(
+                "QLabel { color:#9e9e9e; font-size:13px; padding:4px; }")
+            for b in (self._btn_set_end, self._btn_session_end,
+                      self._btn_rest_pause, self._btn_rest_skip):
+                b.setEnabled(False)
+            self._btn_rest_pause.setText("⏸ 일시정지")
 
     # Protocol queue management
     def _add_to_queue(self) -> None:
@@ -696,8 +861,8 @@ class MeasureTab(QWidget):
     def _on_state(self, st: RecorderState) -> None:
         # Phase-aware live display: only the "recording" phase gets the
         # full raw signal through the dashboard. During wait / countdown /
-        # done / idle phases the dashboard suppresses <10kg readings so
-        # the trainer doesn't see scrolling noise between sessions.
+        # done / idle / inter_set_rest phases the dashboard suppresses
+        # <10kg readings so the trainer doesn't see scrolling noise.
         self._dashboard.set_recording(st.phase == "recording")
 
         kg = self._active_subject.weight_kg if self._active_subject else 0.0
@@ -708,6 +873,9 @@ class MeasureTab(QWidget):
         stance = opts.get("stance", "two") if test in (
             "balance_eo", "balance_ec") else "two"
         self._overlay.update_from_state(st, subject_kg=kg, stance=stance)
+        # Multi-set strength: refresh button enables + indicator label
+        # whenever the state ticks. (Cheap — just label text + setEnabled.)
+        self._refresh_strength_controls(st)
 
     def _on_finished(self, result: dict) -> None:
         # Realtime overlay no longer needed — kill the live worker

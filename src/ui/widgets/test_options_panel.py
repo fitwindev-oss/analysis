@@ -19,6 +19,9 @@ import config
 
 
 # Test keys -> (Korean label, default duration_s)
+# strength_3lift is a multi-set, operator-driven test — duration_s is
+# unused (the recorder ignores it for that test) so we set it to 0
+# and hide the duration row from the UI.
 TESTS_KO: list[tuple[str, str, float]] = [
     ("balance_eo",     "밸런스 (눈 뜨고)",     30.0),
     ("balance_ec",     "밸런스 (눈 감고)",     30.0),
@@ -28,8 +31,16 @@ TESTS_KO: list[tuple[str, str, float]] = [
     ("reaction",       "반응 시간",            60.0),
     ("proprio",        "고유감각",             60.0),
     ("free_exercise",  "자유 운동 측정",       60.0),
+    ("strength_3lift", "전신 근력 (3대 운동)", 0.0),
 ]
 DURATION_BY_TEST: dict[str, float] = {k: d for k, _, d in TESTS_KO}
+
+# Per-exercise pretty labels for the strength_3lift dropdown.
+STRENGTH_EXERCISE_LABELS: list[tuple[str, str]] = [
+    ("bench_press", "벤치프레스 (Bench Press) — 상체"),
+    ("back_squat",  "백스쿼트 (Back Squat) — 하체"),
+    ("deadlift",    "데드리프트 (Deadlift) — 전신"),
+]
 
 
 class TestOptionsPanel(QWidget):
@@ -83,6 +94,13 @@ class TestOptionsPanel(QWidget):
             opts["exercise_name"]       = self._free_name.text().strip() or None
             opts["load_kg"]             = float(self._free_load.value())
             opts["use_bodyweight_load"] = self._free_use_bw.isChecked()
+        if test == "strength_3lift":
+            opts["exercise"]    = self._strength_exercise.currentData()
+            opts["n_sets"]      = int(self._strength_n_sets.value())
+            opts["target_reps"] = int(self._strength_reps.value())
+            opts["load_kg"]     = float(self._strength_load.value())
+            opts["rest_s"]      = float(self._strength_rest.value())
+            opts["warmup_set"]  = self._strength_warmup.isChecked()
         return opts
 
     # ── UI build ───────────────────────────────────────────────────────────
@@ -271,6 +289,63 @@ class TestOptionsPanel(QWidget):
         fl.addRow("", self._free_use_bw)
         root.addWidget(self._free_box)
 
+        # ── Strength 3-lift (Phase V1-E) ────────────────────────────────────
+        # Multi-set protocol: bench_press / back_squat / deadlift × N sets
+        # of target_reps reps with `rest_s` inter-set rest. Set ends are
+        # operator-driven via the "세트 종료" button in MeasureTab; rest
+        # auto-transitions. See SessionRecorder.end_set / pause_rest etc.
+        self._strength_box = QGroupBox("3대 운동 옵션")
+        sl = QFormLayout(self._strength_box)
+
+        self._strength_exercise = QComboBox()
+        for key, ko in STRENGTH_EXERCISE_LABELS:
+            self._strength_exercise.addItem(ko, key)
+        sl.addRow("운동", self._strength_exercise)
+
+        self._strength_n_sets = QSpinBox()
+        self._strength_n_sets.setRange(3, 5)
+        self._strength_n_sets.setValue(3)
+        self._strength_n_sets.setToolTip(
+            "총 측정 세트 수 (3-5). 1세트 워밍업 + 2-4 본세트가 일반적입니다.")
+        sl.addRow("세트 수", self._strength_n_sets)
+
+        self._strength_reps = QSpinBox()
+        self._strength_reps.setRange(1, 30)
+        self._strength_reps.setValue(12)
+        self._strength_reps.setToolTip(
+            "목표 반복 횟수 (안내용). 10-12회를 권장합니다 — 1RM 추정 신뢰도가 "
+            "가장 높은 구간입니다. 실패 직전까지 반복하세요.")
+        sl.addRow("목표 반복 횟수", self._strength_reps)
+
+        self._strength_load = QDoubleSpinBox()
+        self._strength_load.setRange(0.0, 500.0)
+        self._strength_load.setDecimals(1)
+        self._strength_load.setSingleStep(2.5)
+        self._strength_load.setValue(40.0)
+        self._strength_load.setSuffix(" kg")
+        self._strength_load.setToolTip(
+            "바벨 외부 하중 (자체 중량). 모든 세트는 같은 하중으로 진행합니다.")
+        sl.addRow("작업 하중", self._strength_load)
+
+        self._strength_rest = QDoubleSpinBox()
+        self._strength_rest.setRange(1.0, 600.0)
+        self._strength_rest.setDecimals(1)
+        self._strength_rest.setSingleStep(5.0)
+        self._strength_rest.setValue(30.0)
+        self._strength_rest.setSuffix(" s")
+        self._strength_rest.setToolTip(
+            "세트 사이 휴식 시간. 30초가 ATP-PCr 회복 반감기 기준 표준값입니다.")
+        sl.addRow("세트간 휴식", self._strength_rest)
+
+        self._strength_warmup = QCheckBox("1세트는 웜업 (1RM 추정에서 제외)")
+        self._strength_warmup.setChecked(True)
+        self._strength_warmup.setToolTip(
+            "체크하면 첫 번째 세트는 웜업 세트로 간주되어 1RM 추정 계산에서 "
+            "제외됩니다. 기록은 그대로 보존됩니다.")
+        sl.addRow("", self._strength_warmup)
+
+        root.addWidget(self._strength_box)
+
         root.addStretch(1)
 
     def _wrap_layout(self, lay) -> QWidget:
@@ -281,11 +356,17 @@ class TestOptionsPanel(QWidget):
         test = self.current_test()
         self._duration.setValue(DURATION_BY_TEST.get(test, 30.0))
         is_balance = test in ("balance_eo", "balance_ec")
+        is_strength = (test == "strength_3lift")
         self._balance_box.setVisible(is_balance)
         self._reaction_box.setVisible(test == "reaction")
         # Encoder-usage checkbox is not applicable to balance tests.
         self._uses_enc.setVisible(not is_balance)
         self._free_box.setVisible(test == "free_exercise")
+        self._strength_box.setVisible(is_strength)
+        # strength_3lift is operator-driven (multi-set); the global
+        # duration_s is unused. Hide the duration row to avoid confusion.
+        self._duration.setEnabled(not is_strength)
+        self._duration.setVisible(not is_strength)
         self.test_changed.emit(test)
 
     def _on_smart_toggled(self, on: bool) -> None:

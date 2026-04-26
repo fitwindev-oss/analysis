@@ -95,6 +95,8 @@ class StabilityOverlay(QWidget):
             self._render_countdown(st)
         elif st.phase == "recording":
             self._render_recording(st)
+        elif st.phase == "inter_set_rest":
+            self._render_inter_set_rest(st)
         elif st.phase == "done":
             self._render_done()
         elif st.phase == "cancelled":
@@ -254,6 +256,47 @@ class StabilityOverlay(QWidget):
         self._progress.setFormat(f"{st.elapsed_s:.1f} / {st.total_s:.0f} s")
         self.setStyleSheet(
             "QWidget { background:#3a0000; border:1px solid #B71C1C; }")
+
+    def _render_inter_set_rest(self, st: RecorderState) -> None:
+        """Multi-set strength assessment — between-set rest screen.
+
+        Shows a big countdown + the next-set indicator. The colour
+        scheme is amber (vs red for recording, green for done) so the
+        operator + subject can tell at a glance which phase we're in.
+        Phase V1-E.
+        """
+        # The recorder advances current_set_idx ONLY when transitioning
+        # back to recording, so during rest the index still points at
+        # the just-finished set. The next set is therefore idx + 2 of N
+        # (1-based for display: "set 1 done, next set 2 of 3").
+        next_set_human = st.current_set_idx + 2          # 1-based
+        n_sets = max(st.n_sets, 1)
+        if st.rest_paused:
+            self._banner.setText(
+                f"⏸ 휴식 일시정지   다음: 세트 {next_set_human}/{n_sets}")
+            self._banner.setStyleSheet("color:#FFA000;")
+        else:
+            self._banner.setText(
+                f"⏱ 세트간 휴식   {st.rest_remaining_s:.1f} s   "
+                f"다음: 세트 {next_set_human}/{n_sets}")
+            self._banner.setStyleSheet("color:#FFD54F;")
+        self._detail_total.setText(
+            f"세트 {st.current_set_idx + 1}/{n_sets} 완료")
+        self._detail_total.setStyleSheet("color:#A5D6A7; font-size:13px;")
+        self._detail_boards.setText(
+            "30초 후 자동 시작 — 또는 [건너뛰기] 버튼" if not st.rest_paused
+            else "[재개] 버튼을 눌러 카운트다운 계속")
+        self._detail_boards.setStyleSheet("color:#FFA726; font-size:13px;")
+        self._detail_std.setText("")
+        # Rest progress: % of rest_s elapsed (filled). When paused,
+        # leave the bar at its current position.
+        # We don't have rest_s in state, so derive from elapsed_s.
+        total = max(st.elapsed_s + st.rest_remaining_s, 1e-6)
+        frac = max(0.0, min(1.0, st.elapsed_s / total))
+        self._progress.setValue(int(frac * 1000))
+        self._progress.setFormat(f"{st.rest_remaining_s:.1f} s")
+        self.setStyleSheet(
+            "QWidget { background:#3a2a00; border:1px solid #FFA000; }")
 
     def _render_done(self) -> None:
         self._banner.setText("✓ 측정 완료")

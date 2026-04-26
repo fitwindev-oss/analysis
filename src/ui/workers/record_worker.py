@@ -50,6 +50,31 @@ class RecordWorker(QThread):
         if self._recorder is not None:
             self._recorder.manual_random()
 
+    # ── Multi-set strength assessment controls (Phase V1-E) ─────────────────
+    # Forward GUI button presses to the recorder's same-named methods.
+    # All four are no-ops when no recording is active OR when the active
+    # test is not ``strength_3lift``.
+
+    def end_set(self) -> None:
+        if self._recorder is not None:
+            self._recorder.end_set()
+
+    def pause_rest(self) -> None:
+        if self._recorder is not None:
+            self._recorder.pause_rest()
+
+    def resume_rest(self) -> None:
+        if self._recorder is not None:
+            self._recorder.resume_rest()
+
+    def skip_rest(self) -> None:
+        if self._recorder is not None:
+            self._recorder.skip_rest()
+
+    def end_session(self) -> None:
+        if self._recorder is not None:
+            self._recorder.end_session()
+
     # ── QThread entry point ─────────────────────────────────────────────────
     def run(self) -> None:
         rec = SessionRecorder(self._cfg)
