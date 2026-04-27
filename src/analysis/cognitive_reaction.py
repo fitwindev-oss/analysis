@@ -71,6 +71,171 @@ def _kpt_index_for_body_part(body_part: str) -> int:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# V6-G1 — Grading + Cognitive Reaction Index (CRI)
+# ─────────────────────────────────────────────────────────────────────────────
+# Trial grade thresholds (ms) — chosen from the choice-RT literature
+# (Posner 1980, Salthouse 1996) with 4-zone gamification mapping:
+#   GREAT  : elite athlete / young adult range
+#   GOOD   : healthy adult average
+#   NORMAL : borderline / older adults
+#   BAD    : delayed or missed
+RT_GREAT_MS:  float = 350.0
+RT_GOOD_MS:   float = 500.0
+RT_NORMAL_MS: float = 750.0
+# Beyond RT_BAD_MS the analyzer would already classify the trial as
+# no_response (max_response_s = 2.5 s == 2500 ms).
+
+# Per-trial weight applied when computing the Mean Score.
+# Miss / no-response gets 0; over-NORMAL hits still earn a small score
+# so a slow-but-accurate participant doesn't rank below a no-response.
+GRADE_WEIGHT: dict[str, float] = {
+    "great":  1.00,
+    "good":   0.75,
+    "normal": 0.50,
+    "bad":    0.20,
+    "miss":   0.00,
+}
+
+# Korean labels for the report.
+GRADE_LABELS_KO: dict[str, str] = {
+    "great":  "탁월",
+    "good":   "양호",
+    "normal": "보통",
+    "bad":    "지연",
+    "miss":   "미응답",
+}
+
+# Overall letter grade thresholds on the 0-100 CRI scale.
+CRI_GRADE_BANDS: list[tuple[float, str, str]] = [
+    (85.0, "A", "매우 우수"),
+    (70.0, "B", "우수"),
+    (55.0, "C", "보통"),
+    (40.0, "D", "미흡"),
+    (0.0,  "E", "부족"),
+]
+
+
+def grade_trial(rt_ms: Optional[float], hit: bool) -> str:
+    """Classify a single trial into great / good / normal / bad / miss.
+
+    A trial is "miss" if the subject never reached the target within
+    the spatial-error tolerance. "bad" is reserved for hits that took
+    longer than NORMAL (still credited but minimally). RT=None or NaN
+    is treated as miss.
+    """
+    if not hit:
+        return "miss"
+    if rt_ms is None or not np.isfinite(rt_ms):
+        return "miss"
+    if rt_ms <= RT_GREAT_MS:
+        return "great"
+    if rt_ms <= RT_GOOD_MS:
+        return "good"
+    if rt_ms <= RT_NORMAL_MS:
+        return "normal"
+    return "bad"
+
+
+def grade_score(grade: str) -> float:
+    """Look up the per-trial weight for a grade label."""
+    return float(GRADE_WEIGHT.get(grade, 0.0))
+
+
+def cri_letter_grade(cri: float) -> tuple[str, str]:
+    """Map a 0-100 CRI to (letter, korean_label)."""
+    for cutoff, letter, label in CRI_GRADE_BANDS:
+        if cri >= cutoff:
+            return letter, label
+    return "E", "부족"
+
+
+def compute_cri(trials: list) -> dict:
+    """Compute the Cognitive Reaction Index + sub-scores from a list
+    of CogTrial (or compatible dicts).
+
+    Returns a dict with:
+      cri               0-100 composite (0.5*MS + 0.3*AS + 0.2*CS)
+      mean_score        0-100 weighted by per-trial grade
+      accuracy_score    0-100 = n_hit / n_trials × 100
+      consistency_score 0-100 = (1 - CV_RT) × 100, clamped ≥ 0
+      overall_grade     letter A..E
+      overall_label_ko  Korean label
+      grade_counts      dict {great, good, normal, bad, miss}
+      cv_rt             coefficient of variation for valid RTs
+    """
+    n_total = len(trials)
+    if n_total == 0:
+        return {
+            "cri": 0.0, "mean_score": 0.0, "accuracy_score": 0.0,
+            "consistency_score": 0.0, "overall_grade": "E",
+            "overall_label_ko": "부족",
+            "grade_counts": {k: 0 for k in GRADE_WEIGHT.keys()},
+            "cv_rt": 0.0,
+        }
+
+    # Resolve trial fields whether we got dataclasses or dicts
+    def _g(t, name, default=None):
+        if hasattr(t, name):
+            return getattr(t, name)
+        if isinstance(t, dict):
+            return t.get(name, default)
+        return default
+
+    grades = [_g(t, "grade") or grade_trial(_g(t, "rt_ms"),
+                                              bool(_g(t, "hit", False)))
+              for t in trials]
+    weights = [grade_score(g) for g in grades]
+
+    n_hit = sum(1 for t in trials if bool(_g(t, "hit", False)))
+    rts = [float(_g(t, "rt_ms"))
+           for t in trials
+           if _g(t, "rt_ms") is not None and np.isfinite(_g(t, "rt_ms"))]
+
+    # 1. Mean Score — average weight × 100 over ALL trials (miss = 0)
+    mean_score = float(np.mean(weights)) * 100.0
+
+    # 2. Accuracy Score — hit rate × 100
+    accuracy_score = (n_hit / n_total) * 100.0
+
+    # 3. Consistency Score from CV of valid RTs
+    if len(rts) >= 2:
+        m = float(np.mean(rts))
+        s = float(np.std(rts))
+        cv = s / m if m > 0 else 0.0
+        consistency_score = max(0.0, (1.0 - cv) * 100.0)
+    else:
+        cv = 0.0
+        consistency_score = 0.0   # not enough trials to assess
+
+    cri = (0.50 * mean_score + 0.30 * accuracy_score
+           + 0.20 * consistency_score)
+
+    letter, label_ko = cri_letter_grade(cri)
+
+    grade_counts: dict = {k: 0 for k in GRADE_WEIGHT.keys()}
+    for g in grades:
+        if g in grade_counts:
+            grade_counts[g] += 1
+
+    return {
+        "cri":               float(cri),
+        "mean_score":        float(mean_score),
+        "accuracy_score":    float(accuracy_score),
+        "consistency_score": float(consistency_score),
+        "overall_grade":     letter,
+        "overall_label_ko":  label_ko,
+        "grade_counts":      grade_counts,
+        "cv_rt":             float(cv),
+    }
+
+
+def live_cri_after(trials_so_far: list) -> float:
+    """Convenience: just the CRI value, for live HUD updates during
+    measurement (where we recompute after every fired stim)."""
+    return float(compute_cri(trials_so_far)["cri"])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Result types
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -101,6 +266,10 @@ class CogTrial:
     #   "no_motion_no_hit"   threshold never crossed AND wrist never
     #                        reached the target (true no-response)
     failure_reason: Optional[str] = None
+    # V6-G1 — gamification grade (great / good / normal / bad / miss).
+    # Filled in after rt_ms / hit are resolved. Drives the HUD message
+    # during recording + the per-trial color in the report.
+    grade: Optional[str] = None
 
 
 @dataclass
@@ -133,6 +302,15 @@ class CognitiveReactionResult:
     #   ok_motion_onset / ok_proximity_hit / out_of_video /
     #   no_visible_kpt / no_motion_no_hit / post_window_too_short.
     failure_reason_counts: dict = field(default_factory=dict)
+    # V6-G1 — gamified summary
+    cri:               float = 0.0       # 0..100 composite
+    mean_score:        float = 0.0       # 0..100 from grade weights
+    accuracy_score:    float = 0.0       # 0..100 = hit_rate_pct
+    consistency_score: float = 0.0       # 0..100 from CV(RT)
+    overall_grade:     str   = "E"       # letter A..E
+    overall_label_ko:  str   = "부족"
+    grade_counts:      dict  = field(default_factory=dict)
+    cv_rt:             float = 0.0       # CV of valid RTs
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -460,6 +638,8 @@ def analyze_cognitive_reaction(
             else:
                 trial_failure_reason = per_cam[0].get("failure_reason")
 
+        # V6-G1 — gamification grade (great / good / normal / bad / miss)
+        trial_grade = grade_trial(rt, hit)
         trials.append(CogTrial(
             trial_idx=i,
             target_label=label,
@@ -472,6 +652,7 @@ def analyze_cognitive_reaction(
             spatial_error_norm=err,
             hit=hit,
             no_response=no_resp,
+            grade=trial_grade,
         ))
 
     # Aggregates
@@ -528,6 +709,10 @@ def analyze_cognitive_reaction(
         key = t.failure_reason or "unknown"
         failure_reason_counts[key] = failure_reason_counts.get(key, 0) + 1
 
+    # V6-G1 — composite scoring (CRI). Computed from the assembled
+    # trial list so it always agrees with the per-trial grade fields.
+    cri_block = compute_cri(trials)
+
     return CognitiveReactionResult(
         n_trials=len(trials),
         n_valid=len(valid),
@@ -547,6 +732,14 @@ def analyze_cognitive_reaction(
         per_target=per_target,
         trials=trials,
         failure_reason_counts=failure_reason_counts,
+        cri=cri_block["cri"],
+        mean_score=cri_block["mean_score"],
+        accuracy_score=cri_block["accuracy_score"],
+        consistency_score=cri_block["consistency_score"],
+        overall_grade=cri_block["overall_grade"],
+        overall_label_ko=cri_block["overall_label_ko"],
+        grade_counts=cri_block["grade_counts"],
+        cv_rt=cri_block["cv_rt"],
     )
 
 
