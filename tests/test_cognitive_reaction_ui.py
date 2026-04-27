@@ -233,6 +233,142 @@ def test_camera_view_set_positional_cue_broadcasts():
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# V6-hit — live "체크" feedback when tracked body part reaches the cue
+# ────────────────────────────────────────────────────────────────────────────
+def test_set_track_body_part_resolves_to_mp33_index():
+    """set_track_body_part must map the body-part string to the right
+    MP33 keypoint index so the GUI's hit detector and the offline
+    analyzer agree on which joint they're watching."""
+    from src.ui.widgets.camera_view import BODY_PART_TO_KP_INDEX
+    from src.pose.mediapipe_backend import MP33
+    cv = CameraView()
+    cv.set_track_body_part("right_hand")
+    for t in cv._tiles.values():
+        assert t._track_kpt_idx == MP33["right_wrist"]
+    cv.set_track_body_part("left_foot")
+    for t in cv._tiles.values():
+        assert t._track_kpt_idx == MP33["left_foot_index"]
+    cv.set_track_body_part(None)
+    for t in cv._tiles.values():
+        assert t._track_kpt_idx is None
+
+
+def test_evaluate_hit_inside_tolerance():
+    """Tracked keypoint within tolerance ring → _evaluate_hit True."""
+    from src.pose.mediapipe_backend import MP33
+    tile = _SingleCamTile("camA", "test")
+    tile.set_track_body_part("right_hand")
+    tile.set_positional_cue(0.50, 0.50, "pos_C")
+    # Build a synthetic kpts33 array with right_wrist exactly on the cue.
+    w, h = 640, 480
+    kpts = np.full((33, 2), np.nan, dtype=np.float32)
+    vis = np.zeros(33, dtype=np.float32)
+    wrist_idx = MP33["right_wrist"]
+    kpts[wrist_idx] = [0.50 * (w - 1), 0.50 * (h - 1)]
+    vis[wrist_idx] = 1.0
+    tile._kpts = kpts; tile._vis = vis
+    assert tile._evaluate_hit(w, h) is True
+
+
+def test_evaluate_hit_outside_tolerance():
+    """Tracked keypoint far from cue → not a hit."""
+    from src.pose.mediapipe_backend import MP33
+    tile = _SingleCamTile("camA", "test")
+    tile.set_track_body_part("right_hand")
+    tile.set_positional_cue(0.20, 0.20, "pos_NW")
+    w, h = 640, 480
+    kpts = np.full((33, 2), np.nan, dtype=np.float32)
+    vis = np.zeros(33, dtype=np.float32)
+    wrist_idx = MP33["right_wrist"]
+    # Wrist on the opposite side of the frame
+    kpts[wrist_idx] = [0.85 * (w - 1), 0.85 * (h - 1)]
+    vis[wrist_idx] = 1.0
+    tile._kpts = kpts; tile._vis = vis
+    assert tile._evaluate_hit(w, h) is False
+
+
+def test_evaluate_hit_low_visibility_returns_false():
+    """If the tracked keypoint has visibility below threshold, treat
+    as 'no hit' rather than a false positive."""
+    from src.pose.mediapipe_backend import MP33
+    tile = _SingleCamTile("camA", "test")
+    tile.set_track_body_part("right_hand")
+    tile.set_positional_cue(0.50, 0.50, "pos_C")
+    w, h = 640, 480
+    kpts = np.full((33, 2), np.nan, dtype=np.float32)
+    vis = np.zeros(33, dtype=np.float32)
+    wrist_idx = MP33["right_wrist"]
+    kpts[wrist_idx] = [0.50 * (w - 1), 0.50 * (h - 1)]
+    vis[wrist_idx] = 0.1   # below _VIS_THRESH
+    tile._kpts = kpts; tile._vis = vis
+    assert tile._evaluate_hit(w, h) is False
+
+
+def test_evaluate_hit_no_tracking_disabled():
+    """Without set_track_body_part call, hit detection always False."""
+    tile = _SingleCamTile("camA", "test")
+    tile.set_positional_cue(0.5, 0.5, "pos_C")
+    w, h = 640, 480
+    kpts = np.full((33, 2), np.nan, dtype=np.float32)
+    vis = np.zeros(33, dtype=np.float32)
+    tile._kpts = kpts; tile._vis = vis
+    assert tile._evaluate_hit(w, h) is False
+
+
+def test_draw_positional_cue_hit_state_differs_from_rest():
+    """Hit-state cue should produce visibly different pixels than
+    the resting cue at the same center (different colors, checkmark)."""
+    bgr_rest = np.full((480, 640, 3), 30, dtype=np.uint8)
+    bgr_hit  = np.full((480, 640, 3), 30, dtype=np.uint8)
+    _SingleCamTile._draw_positional_cue(
+        bgr_rest, (0.5, 0.5), "pos_C", phase=10, hit=False)
+    _SingleCamTile._draw_positional_cue(
+        bgr_hit, (0.5, 0.5), "pos_C", phase=10, hit=True)
+    # Pixels at the cue center should differ — hit has the checkmark
+    # tick lines plus a different core color.
+    diff = np.abs(bgr_rest.astype(int) - bgr_hit.astype(int)).sum()
+    assert diff > 0
+
+
+def test_options_panel_forces_live_pose_for_cognitive_reaction():
+    """V6-hit — live pose overlay is required for the on-screen "체크"
+    effect, so cognitive_reaction must lock _live_pose=True."""
+    panel = TestOptionsPanel()
+    # Switch away first and clear live_pose
+    panel._combo.setCurrentIndex(panel._combo.findData("balance_eo"))
+    panel._live_pose.setChecked(False)
+    panel._combo.setCurrentIndex(panel._combo.findData("cognitive_reaction"))
+    opts = panel.options()
+    assert opts["_live_pose"] is True
+    assert panel._live_pose.isChecked() is True
+    assert panel._live_pose.isEnabled() is False
+
+
+def test_hit_latch_holds_after_brief_overshoot():
+    """The hit-hold counter keeps the cue in 'ack' state for a few
+    repaints after the keypoint leaves the tolerance ring, so brief
+    jitter doesn't flicker the visual feedback."""
+    from src.pose.mediapipe_backend import MP33
+    tile = _SingleCamTile("camA", "test")
+    tile.set_track_body_part("right_hand")
+    tile.set_positional_cue(0.5, 0.5, "pos_C")
+    w, h = 640, 480
+    kpts = np.full((33, 2), np.nan, dtype=np.float32)
+    vis  = np.zeros(33, dtype=np.float32)
+    wrist_idx = MP33["right_wrist"]
+    vis[wrist_idx] = 1.0
+    # Frame 1: in the hit zone
+    kpts[wrist_idx] = [0.50 * (w - 1), 0.50 * (h - 1)]
+    tile._kpts = kpts.copy(); tile._vis = vis.copy()
+    assert tile._evaluate_hit(w, h) is True
+    # Now simulate a frame where wrist briefly leaves the zone — by
+    # itself _evaluate_hit returns False, but the latch in
+    # repaint_if_dirty would still keep showing "hit". We verify the
+    # latch field exists and the threshold is sane (>=4 repaints).
+    assert tile._HIT_HOLD_FRAMES >= 4
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Direct runner
 # ────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":

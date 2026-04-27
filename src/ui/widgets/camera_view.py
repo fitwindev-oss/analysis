@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 )
 
 import config
-from src.pose.mediapipe_backend import MP33_CONNECTIONS
+from src.pose.mediapipe_backend import MP33, MP33_CONNECTIONS
 
 
 _VIS_THRESH = 0.5           # drop landmarks with lower visibility
@@ -35,6 +35,31 @@ _EDGE_COLOR = (0, 200, 0)    # green  (BGR)
 _CUE_HALO_COLOR  = (0, 245, 170)   # BGR — soft halo
 _CUE_CORE_COLOR  = (255, 255, 255) # BGR — bright core
 _CUE_LABEL_COLOR = (255, 255, 255) # BGR — label text
+
+# V6-hit — colors for the "hit" state (tracked body part inside the
+# cue's tolerance ring). Bright cyan-yellow + thicker ring + checkmark
+# read as a clear positive ack distinct from the resting cue.
+_HIT_HALO_COLOR  = (80, 255, 255)   # BGR — bright cyan-yellow halo
+_HIT_CORE_COLOR  = (50, 230, 50)    # BGR — vivid green core
+_HIT_TICK_COLOR  = (50, 230, 50)    # BGR — checkmark color
+_TRACKED_KPT_COLOR_REST = (0, 230, 230)  # BGR — yellow when tracking, no hit
+_TRACKED_KPT_COLOR_HIT  = (50, 230, 50)  # BGR — green when in hit zone
+
+# V6-hit — body-part name → primary MP33 keypoint index. Mirrors the
+# server-side BODY_PART_TO_KEYPOINTS table in src.analysis.cognitive_reaction
+# but indexed directly so the GUI doesn't need to import that module.
+BODY_PART_TO_KP_INDEX: dict[str, int] = {
+    "right_hand": MP33["right_wrist"],
+    "left_hand":  MP33["left_wrist"],
+    "right_foot": MP33["right_foot_index"],
+    "left_foot":  MP33["left_foot_index"],
+}
+
+# Tolerance for declaring a hit, in normalised image-diagonal units.
+# Matches src.analysis.cognitive_reaction.analyze_cognitive_reaction's
+# default ``hit_tolerance_norm`` so the live feedback ring agrees with
+# the offline report's pass/fail call.
+_DEFAULT_HIT_TOLERANCE_NORM = 0.12
 
 
 class _SingleCamTile(QWidget):
@@ -55,6 +80,16 @@ class _SingleCamTile(QWidget):
         # ``_cue_phase`` increments on every repaint while a cue is set,
         # so the ring radius can pulse and read more LED-like.
         self._cue_phase: int = 0
+        # V6-hit — index of the MP33 keypoint we treat as the "tracked"
+        # body part for live hit detection. None = no tracking (no
+        # special highlight; cue still draws but never goes to "hit").
+        self._track_kpt_idx: Optional[int] = None
+        self._hit_tolerance_norm: float = _DEFAULT_HIT_TOLERANCE_NORM
+        # Sticky hit latch — once the tracked keypoint enters the
+        # tolerance ring, hold the "hit" state for ``_hit_hold_frames``
+        # repaints so brief overshoots still register as a clean ack.
+        self._hit_hold_frames_left: int = 0
+        self._HIT_HOLD_FRAMES = 12   # ~0.4 s at 30 Hz UI repaint
         # Dimensions the pose was computed on — may differ from display if the
         # caller feeds us a different-resolution camera. We key all drawing
         # off the frame's own pixel dimensions so rescaling is not needed.
@@ -101,9 +136,23 @@ class _SingleCamTile(QWidget):
             self._cue_xy = None
             self._cue_label = None
             self._cue_phase = 0
+            self._hit_hold_frames_left = 0
             return
+        # New cue → reset the hit latch so the previous trial's hit
+        # doesn't bleed into the new one.
+        if self._cue_xy != (float(x_norm), float(y_norm)):
+            self._hit_hold_frames_left = 0
         self._cue_xy = (float(x_norm), float(y_norm))
         self._cue_label = label
+
+    def set_track_body_part(self, body_part: Optional[str]) -> None:
+        """Set the MP33 keypoint we'll treat as the "tracked" body part
+        for live hit detection. Pass ``None`` to disable.
+        """
+        if not body_part:
+            self._track_kpt_idx = None
+            return
+        self._track_kpt_idx = BODY_PART_TO_KP_INDEX.get(body_part)
 
     def clear(self) -> None:
         self._latest = None
@@ -112,6 +161,7 @@ class _SingleCamTile(QWidget):
         self._cue_xy = None
         self._cue_label = None
         self._cue_phase = 0
+        self._hit_hold_frames_left = 0
         self._render_placeholder()
 
     def repaint_if_dirty(self) -> None:
@@ -125,12 +175,29 @@ class _SingleCamTile(QWidget):
         has_cue      = (self._cue_xy is not None)
         if has_skeleton or has_cue:
             bgr = bgr.copy()
+        # V6-hit — evaluate hit BEFORE drawing skeleton so we can use
+        # the same colored marker on the tracked keypoint when it's in
+        # the hit zone (visible cue ↔ tracked dot ↔ skeleton coloring
+        # all stay in sync).
+        is_hit = False
+        if has_cue and has_skeleton and self._track_kpt_idx is not None:
+            is_hit = self._evaluate_hit(bgr.shape[1], bgr.shape[0])
+            if is_hit:
+                self._hit_hold_frames_left = self._HIT_HOLD_FRAMES
+            elif self._hit_hold_frames_left > 0:
+                # Hit latch still active — keep "hit" state for a few
+                # repaints so brief overshoots don't flicker the ack.
+                self._hit_hold_frames_left -= 1
+                is_hit = True
         if has_skeleton:
-            self._draw_skeleton(bgr, self._kpts, self._vis)
+            self._draw_skeleton(bgr, self._kpts, self._vis,
+                                track_kpt_idx=self._track_kpt_idx,
+                                track_hit=is_hit)
         if has_cue:
             self._cue_phase = (self._cue_phase + 1) % 60
             self._draw_positional_cue(
-                bgr, self._cue_xy, self._cue_label, self._cue_phase)
+                bgr, self._cue_xy, self._cue_label, self._cue_phase,
+                hit=is_hit)
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         img = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
@@ -142,10 +209,55 @@ class _SingleCamTile(QWidget):
         self._img.setPixmap(pix)
 
     # ── drawing ────────────────────────────────────────────────────────────
+    def _evaluate_hit(self, w: int, h: int) -> bool:
+        """Is the tracked keypoint inside the cue's hit-tolerance ring?
+
+        Returns False if either the cue or the tracked keypoint is
+        unavailable (no pose, missing visibility, NaN coords). Distance
+        is measured in image-normalised units so it survives camera
+        resolution changes — same metric the offline analyzer uses.
+        """
+        if (self._cue_xy is None or self._track_kpt_idx is None
+                or self._kpts is None or self._vis is None):
+            return False
+        idx = self._track_kpt_idx
+        if idx < 0 or idx >= 33 or w <= 1 or h <= 1:
+            return False
+        if self._kpts.shape[0] < 33 or self._vis.shape[0] < 33:
+            return False
+        if self._vis[idx] < _VIS_THRESH:
+            return False
+        p = self._kpts[idx]
+        if np.any(np.isnan(p)):
+            return False
+        # Convert tracked keypoint to normalised coords (same convention
+        # as cue: 0..1, top-left origin) and use diagonal-normalised
+        # Euclidean distance — matches the analyzer's err_norm.
+        x_norm = float(p[0]) / float(w - 1)
+        y_norm = float(p[1]) / float(h - 1)
+        cx, cy = self._cue_xy
+        # Aspect-correct distance via image-diagonal:
+        # err_norm = sqrt((dx*w)^2 + (dy*h)^2) / sqrt(w^2 + h^2)
+        dx_px = (x_norm - cx) * (w - 1)
+        dy_px = (y_norm - cy) * (h - 1)
+        diag = float(np.hypot(w, h))
+        if diag <= 0:
+            return False
+        err_norm = float(np.hypot(dx_px, dy_px)) / diag
+        return err_norm <= self._hit_tolerance_norm
+
     @staticmethod
     def _draw_skeleton(bgr: np.ndarray, kpts33: np.ndarray,
-                       vis33: np.ndarray) -> None:
-        """Draw MP33 landmarks + connections in-place on a BGR frame."""
+                       vis33: np.ndarray,
+                       track_kpt_idx: Optional[int] = None,
+                       track_hit: bool = False) -> None:
+        """Draw MP33 landmarks + connections in-place on a BGR frame.
+
+        ``track_kpt_idx`` (if given) is highlighted larger and in a
+        different color to make it obvious which body part is being
+        tracked — green when it's inside the cue's hit zone, yellow
+        otherwise. The other 32 dots use the muted joint color.
+        """
         if kpts33 is None or vis33 is None:
             return
         if kpts33.shape[0] < 33 or vis33.shape[0] < 33:
@@ -172,18 +284,29 @@ class _SingleCamTile(QWidget):
                 continue
             x = int(max(0, min(w - 1, p[0])))
             y = int(max(0, min(h - 1, p[1])))
-            cv2.circle(bgr, (x, y), 3, _KPT_COLOR, -1, cv2.LINE_AA)
+            if i == track_kpt_idx:
+                # Tracked body part — bigger ring + filled center,
+                # color shifts when in hit zone for instant feedback.
+                color = _TRACKED_KPT_COLOR_HIT if track_hit \
+                    else _TRACKED_KPT_COLOR_REST
+                cv2.circle(bgr, (x, y), 9, color, 2, cv2.LINE_AA)
+                cv2.circle(bgr, (x, y), 4, color, -1, cv2.LINE_AA)
+            else:
+                cv2.circle(bgr, (x, y), 3, _KPT_COLOR, -1, cv2.LINE_AA)
 
     @staticmethod
     def _draw_positional_cue(bgr: np.ndarray,
                               xy_norm: tuple[float, float],
                               label: Optional[str],
-                              phase: int) -> None:
+                              phase: int,
+                              hit: bool = False) -> None:
         """Draw an LED-style ring + label at the cued spot.
 
         ``xy_norm`` is in [0,1] image-normalised coords (top-left origin).
         ``phase`` cycles 0..59 to drive a gentle radius pulse so the cue
         reads as "alive" rather than a static decal.
+        ``hit`` switches the look to "ack" mode — bright colors + a
+        checkmark — when the tracked body part has reached the target.
         """
         h, w = bgr.shape[:2]
         if w <= 1 or h <= 1:
@@ -195,34 +318,57 @@ class _SingleCamTile(QWidget):
         # Base radius scales with the smaller image dimension so the cue
         # stays visible across portrait + landscape camera streams.
         base = max(14, min(w, h) // 18)
-        # Pulse: ±15 % over 60 phase ticks (~2 s at 30 Hz)
-        pulse = 1.0 + 0.15 * np.sin(2 * np.pi * phase / 60.0)
+        # Pulse: ±15 % rest, ±25 % when hit (faster + deeper modulation
+        # for an obvious "ack" feel).
+        if hit:
+            pulse = 1.0 + 0.25 * np.sin(2 * np.pi * phase / 30.0)
+        else:
+            pulse = 1.0 + 0.15 * np.sin(2 * np.pi * phase / 60.0)
         r_outer = int(round(base * 1.6 * pulse))
         r_mid   = int(round(base * 1.0 * pulse))
         r_core  = int(round(base * 0.55))
-        # Halo — drawn additively for a soft glow effect on darker frames.
-        # Use a translucent overlay via copyTo with weighted blend so the
-        # underlying camera image still shows through.
+        halo_color = _HIT_HALO_COLOR if hit else _CUE_HALO_COLOR
+        core_color = _HIT_CORE_COLOR if hit else _CUE_CORE_COLOR
+        ring_thick = 5 if hit else 3
+        halo_alpha = 0.55 if hit else 0.35
+        # Halo — translucent overlay so the camera image still shows
+        # through. Stronger blend in the hit state so the ack reads
+        # against busy backgrounds.
         overlay = bgr.copy()
-        cv2.circle(overlay, (cx, cy), r_outer, _CUE_HALO_COLOR, -1,
-                   cv2.LINE_AA)
-        cv2.addWeighted(overlay, 0.35, bgr, 0.65, 0, bgr)
+        cv2.circle(overlay, (cx, cy), r_outer, halo_color, -1, cv2.LINE_AA)
+        cv2.addWeighted(overlay, halo_alpha, bgr, 1.0 - halo_alpha, 0, bgr)
         # Crisp ring + bright core
-        cv2.circle(bgr, (cx, cy), r_mid,  _CUE_HALO_COLOR, 3, cv2.LINE_AA)
-        cv2.circle(bgr, (cx, cy), r_core, _CUE_CORE_COLOR, -1, cv2.LINE_AA)
+        cv2.circle(bgr, (cx, cy), r_mid,  halo_color, ring_thick, cv2.LINE_AA)
+        cv2.circle(bgr, (cx, cy), r_core, core_color, -1, cv2.LINE_AA)
+        # V6-hit — checkmark inside the core when in hit state. Drawn
+        # as two anti-aliased line segments so it scales cleanly with
+        # ``base``.
+        if hit:
+            check_scale = max(0.6, base / 18.0)
+            # Checkmark vertices in pixels relative to (cx, cy)
+            p1 = (cx - int(7 * check_scale), cy + int(1 * check_scale))
+            p2 = (cx - int(2 * check_scale), cy + int(6 * check_scale))
+            p3 = (cx + int(8 * check_scale), cy - int(6 * check_scale))
+            tk = max(2, int(round(3 * check_scale)))
+            cv2.line(bgr, p1, p2, _HIT_TICK_COLOR, tk + 1, cv2.LINE_AA)
+            cv2.line(bgr, p2, p3, _HIT_TICK_COLOR, tk + 1, cv2.LINE_AA)
+            # White inner stroke to lift the tick off the green core
+            cv2.line(bgr, p1, p2, (255, 255, 255), max(1, tk - 1), cv2.LINE_AA)
+            cv2.line(bgr, p2, p3, (255, 255, 255), max(1, tk - 1), cv2.LINE_AA)
         # Optional label below the ring
         if label:
-            text = label.replace("pos_", "")
+            text = ("✓ " if hit else "") + label.replace("pos_", "")
             (tw, th), _ = cv2.getTextSize(
                 text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
             tx = max(2, min(w - tw - 2, cx - tw // 2))
             ty = min(h - 4, cy + r_outer + th + 6)
+            label_color = _HIT_TICK_COLOR if hit else _CUE_LABEL_COLOR
             # Drop-shadow so text reads against any background
             cv2.putText(bgr, text, (tx + 1, ty + 1),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3,
                         cv2.LINE_AA)
             cv2.putText(bgr, text, (tx, ty),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, _CUE_LABEL_COLOR,
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, label_color,
                         2, cv2.LINE_AA)
 
     def _render_placeholder(self) -> None:
@@ -325,6 +471,19 @@ class CameraView(QWidget):
             t = self._tiles.get(cam_id)
             if t is not None:
                 t.set_positional_cue(x_norm, y_norm, label)
+
+    def set_track_body_part(self, body_part: Optional[str]) -> None:
+        """Tell every tile which MP33 keypoint to treat as the "tracked"
+        body part for live hit detection (V6 cognitive_reaction).
+
+        ``body_part`` ∈ {right_hand, left_hand, right_foot, left_foot}
+        or None to disable. Hit state is only evaluated on tiles that
+        also receive pose overlays via ``on_pose_overlay``; the live
+        pose worker only runs on one camera so other tiles still draw
+        the cue but never light up.
+        """
+        for t in self._tiles.values():
+            t.set_track_body_part(body_part)
 
     def reset(self) -> None:
         for t in self._tiles.values():

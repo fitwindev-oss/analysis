@@ -777,6 +777,15 @@ class MeasureTab(QWidget):
             f"starting: {self._summarize_opts(opts)}")
 
         self._camera_view.reset()
+        # V6 — tell the camera tiles which body part we're tracking so
+        # the live pose overlay can highlight that keypoint and switch
+        # the cue to "hit" state when it reaches the target. Cleared
+        # for non-cognitive_reaction tests (no special highlight).
+        if cfg.test == "cognitive_reaction":
+            self._camera_view.set_track_body_part(
+                getattr(cfg, "react_track_body_part", None))
+        else:
+            self._camera_view.set_track_body_part(None)
         self._dashboard.reset()
         self._dashboard.set_subject_weight(self._active_subject.weight_kg)
         self._overlay.reset()

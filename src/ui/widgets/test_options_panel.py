@@ -78,7 +78,12 @@ class TestOptionsPanel(QWidget):
         # trajectory in poses_*.npz. Without auto-pose enabled the
         # session lands as "0 valid trials" because the analyzer has no
         # pose data to read. Force pose-on regardless of the checkbox.
+        # Same logic for live pose — we need the realtime skeleton on
+        # at least one camera tile to drive the on-screen "LED hit"
+        # visual feedback so trainer + subject see the cue light up
+        # the moment the tracked body part reaches the target.
         force_auto_pose = (test == "cognitive_reaction")
+        force_live_pose = (test == "cognitive_reaction")
         opts: dict = {
             "test":           test,
             "duration_s":     self._duration.value(),
@@ -90,7 +95,7 @@ class TestOptionsPanel(QWidget):
             "uses_encoder":   True if is_balance else self._uses_enc.isChecked(),
             "_auto_pose":         force_auto_pose or self._auto_pose.isChecked(),
             "_post_complexity":   int(self._post_complexity.currentData() or 1),
-            "_live_pose":         self._live_pose.isChecked(),
+            "_live_pose":         force_live_pose or self._live_pose.isChecked(),
             "_live_complexity":   int(self._live_complexity.currentData() or 0),
             "_live_cam_id":       str(self._live_cam_combo.currentData()
                                       or config.POSE_REALTIME_CAM_ID),
@@ -471,12 +476,24 @@ class TestOptionsPanel(QWidget):
                 "시각/인지 반응 검사는 스켈레톤(MediaPipe)으로 손/발 궤적을 "
                 "추적해 RT/MT/공간정확도를 산출하기 때문에 자동 포즈 처리가 "
                 "필수입니다. 비활성화 불가.")
+            # Realtime overlay also forced on — needed so the LED ring
+            # can switch to "hit" state when the tracked body part
+            # reaches the target on-screen.
+            self._live_pose.setChecked(True)
+            self._live_pose.setEnabled(False)
+            self._live_pose.setToolTip(
+                "시각/인지 반응 검사는 큐 도달(체크) 효과를 위해 실시간 "
+                "스켈레톤이 필요합니다. 비활성화 불가.")
         else:
             self._auto_pose.setEnabled(True)
             self._auto_pose.setToolTip(
                 "녹화된 mp4에서 MediaPipe BlazePose로 33개 관절을 추정하고, "
                 "분석 리포트에 12개 관절 각도를 포함시킵니다.\n"
                 "실패해도 Force 분석 결과는 보존됩니다.")
+            self._live_pose.setEnabled(True)
+            self._live_pose.setToolTip(
+                "녹화 중 선택한 1 카메라에 BlazePose 결과를 skeleton으로 "
+                "오버레이합니다. CPU 사용량이 높으면 Lite 모델을 권장합니다.")
         # strength_3lift is operator-driven (multi-set); the global
         # duration_s is unused. Hide the duration row to avoid confusion.
         self._duration.setEnabled(not is_strength)
