@@ -548,7 +548,20 @@ class SessionRecorder:
     def _start_hardware(self) -> None:
         # DAQ
         self._daq = DaqReader()
-        if self.cfg.use_smart_wait:
+        # Phase V6 fix — smart-wait is a force-plate stance gate (waits
+        # until both feet are stable on the plate). For tests where the
+        # subject doesn't stand on the plate at all, leaving smart-wait
+        # on means the recorder hangs forever in the "wait" phase. The
+        # cognitive_reaction test is a hand/foot reach test driven by
+        # screen cues — there's no force-plate stance to wait for, so
+        # we always skip the StabilityDetector for it (regardless of the
+        # use_smart_wait UI flag) and the run-loop falls straight into
+        # the fixed countdown_s before recording starts.
+        wants_smart_wait = (
+            self.cfg.use_smart_wait
+            and self.cfg.test != "cognitive_reaction"
+        )
+        if wants_smart_wait:
             stance_mode = self.cfg.stance if self.cfg.test in (
                 "balance_eo", "balance_ec") else "two"
             # Let StabilityDetector pick stance-appropriate hold time:
@@ -558,6 +571,10 @@ class SessionRecorder:
                 timeout_s=self.cfg.wait_timeout_s,
                 stance_mode=stance_mode,
             )
+        elif self.cfg.use_smart_wait and self.cfg.test == "cognitive_reaction":
+            self._log(
+                "smart-wait skipped for cognitive_reaction "
+                "(no force-plate stance involved)")
         if self._daq.connect():
             def _on_daq(fr: DaqFrame) -> None:
                 # Single reference assignment is atomic in CPython, so

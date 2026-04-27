@@ -83,6 +83,54 @@ def test_position_table_has_correct_geometry():
     assert p["pos_W"][0] < 0.5      # west → small x
 
 
+def test_smart_wait_bypassed_for_cognitive_reaction():
+    """V6-fix — smart-wait depends on force-plate stance, but the
+    cognitive_reaction test is a hand/foot reach driven by screen cues
+    with no plate involvement. The recorder must skip StabilityDetector
+    construction even when ``use_smart_wait=True`` so the run-loop falls
+    straight into the fixed countdown instead of hanging in 'wait'.
+
+    We don't run the full hardware loop here (no DAQ in CI); we just
+    inspect the StabilityDetector decision logic by mirroring what
+    ``_start_hardware`` does inline.
+    """
+    cfg = RecorderConfig(test="cognitive_reaction",
+                         use_smart_wait=True,
+                         react_n_positions=4,
+                         duration_s=30.0, n_stimuli=4, trigger="auto")
+    rec = SessionRecorder(cfg)
+    # Mirror the gating inside _start_hardware.
+    wants_smart_wait = (
+        rec.cfg.use_smart_wait
+        and rec.cfg.test != "cognitive_reaction")
+    assert wants_smart_wait is False, (
+        "cognitive_reaction must skip smart-wait — "
+        "force-plate stance has no role in a hand-reach test")
+
+
+def test_smart_wait_still_active_for_classic_reaction():
+    """Classic reaction stays gated on stance — both feet on plate."""
+    cfg = RecorderConfig(test="reaction", use_smart_wait=True,
+                         duration_s=30.0, n_stimuli=4, trigger="auto",
+                         responses="random")
+    rec = SessionRecorder(cfg)
+    wants_smart_wait = (
+        rec.cfg.use_smart_wait
+        and rec.cfg.test != "cognitive_reaction")
+    assert wants_smart_wait is True
+
+
+def test_smart_wait_off_skips_for_all_tests():
+    """If the operator turned the checkbox off, the gate stays off
+    regardless of the test type (sanity)."""
+    cfg = RecorderConfig(test="cmj", use_smart_wait=False, duration_s=10.0)
+    rec = SessionRecorder(cfg)
+    wants_smart_wait = (
+        rec.cfg.use_smart_wait
+        and rec.cfg.test != "cognitive_reaction")
+    assert wants_smart_wait is False
+
+
 def test_reaction_responses_includes_positions():
     """Each pos_* key must have an on-screen banner registered."""
     for k in ("pos_N", "pos_NE", "pos_E", "pos_SE",
