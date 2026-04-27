@@ -31,6 +31,19 @@ _BODY_PART_KO: dict[str, str] = {
     "left_foot":  "왼발",
 }
 
+# V6-fix2 — Korean labels for failure_reason histogram
+_FAIL_REASON_KO: dict[str, str] = {
+    "ok_motion_onset":         "정상 (모션 onset 검출)",
+    "ok_proximity_hit":        "정상 (느린 reach, 근접 도달)",
+    "out_of_video":            "자극 시점이 비디오 범위 밖",
+    "no_visible_kpt":          "추적 부위 visibility 부족",
+    "no_visible_kpt_after_onset": "onset 후 추적 부위 사라짐",
+    "no_motion_no_hit":        "동작 미검출 + 목표 미도달",
+    "post_window_too_short":   "분석 창 너무 짧음 (비디오 끝)",
+    "zero_image_size":         "이미지 크기 정보 없음",
+    "unknown":                 "알 수 없음",
+}
+
 
 def _fmt_ms(v: Optional[float]) -> str:
     if v is None:
@@ -138,6 +151,41 @@ class CognitiveReactionSection(ReportSection):
                 f"style='max-width:60%; height:auto; "
                 f"display:block; margin:0 auto;'>")
 
+        # V6-fix2 — failure-reason histogram. Always render when there
+        # are any non-OK reasons OR when n_valid==0 (operator needs to
+        # see why the run came up empty).
+        fail_counts = result.get("failure_reason_counts") or {}
+        non_ok = {k: v for k, v in fail_counts.items()
+                  if not k.startswith("ok_")}
+        n_valid = int(result.get("n_valid") or 0)
+        diag_block = ""
+        if non_ok or n_valid == 0:
+            rows = []
+            for k in sorted(fail_counts.keys()):
+                v = fail_counts[k]
+                ko = _FAIL_REASON_KO.get(k, k)
+                color = "#2E7D32" if k.startswith("ok_") else "#C62828"
+                rows.append(
+                    f"<tr><td style='padding:3px 8px; color:{color};'>{ko}</td>"
+                    f"<td style='padding:3px 8px; font-weight:600;'>{v} 회</td></tr>")
+            empty_warn = ""
+            if n_valid == 0:
+                empty_warn = (
+                    "<div style='color:#C62828; margin-top:6px; "
+                    "font-size:11px;'>유효 측정 0회 — 분석기가 모든 시행을 "
+                    "무응답으로 분류했습니다. 아래 사유 분포를 확인해 "
+                    "원인을 파악해주세요.</div>")
+            diag_block = (
+                "<details style='margin-top:10px;'>"
+                "<summary style='font-weight:600; color:#555; "
+                "cursor:pointer;'>시행별 분류 사유 (디버그)</summary>"
+                f"{empty_warn}"
+                "<table style='border-collapse:collapse; font-size:11px; "
+                "margin-top:6px; background:#FAFAFA; "
+                "border:1px solid #E0E0E0;'>"
+                f"{''.join(rows)}"
+                "</table></details>")
+
         return f"""
         <h2 style='margin-top:20px;'>인지 반응 (V6)</h2>
         <p style='color:#666; font-size:12px; margin:0 0 8px;'>
@@ -150,6 +198,7 @@ class CognitiveReactionSection(ReportSection):
           {rows_html}
         </table>
         {''.join(chart_blocks)}
+        {diag_block}
         """
 
     # ── PDF ─────────────────────────────────────────────────────────────

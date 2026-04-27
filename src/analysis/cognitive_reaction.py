@@ -90,6 +90,17 @@ class CogTrial:
     spatial_error_norm:  Optional[float] = None
     hit: bool = False
     no_response: bool = False
+    # V6-fix2 — per-trial diagnostic so a "0 valid" report can be
+    # debugged without re-running the analysis. Common values:
+    #   "ok_motion_onset"    standard motion-onset detection succeeded
+    #   "ok_proximity_hit"   fallback fired (wrist reached the target
+    #                        without a sharp motion onset — slow reach)
+    #   "out_of_video"       stim time falls past the end of the video
+    #   "no_baseline"        too few pre-stim frames to compute threshold
+    #   "no_visible_kpt"     wrist had visibility < 0.5 for whole window
+    #   "no_motion_no_hit"   threshold never crossed AND wrist never
+    #                        reached the target (true no-response)
+    failure_reason: Optional[str] = None
 
 
 @dataclass
@@ -117,6 +128,11 @@ class CognitiveReactionResult:
     # Per target-direction breakdown
     per_target: dict = field(default_factory=dict)
     trials:     list = field(default_factory=list)
+    # V6-fix2 — histogram of per-trial failure_reason values so a
+    # "0 valid" report can be debugged at a glance. Common keys:
+    #   ok_motion_onset / ok_proximity_hit / out_of_video /
+    #   no_visible_kpt / no_motion_no_hit / post_window_too_short.
+    failure_reason_counts: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -127,6 +143,13 @@ class CognitiveReactionResult:
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-cam trajectory analysis
 # ─────────────────────────────────────────────────────────────────────────────
+
+_VIS_THRESH = 0.5            # min visibility to trust a keypoint
+_THRESHOLD_PX_PER_FRAME_CAP = 30.0   # cap on baseline-derived onset
+                                       # threshold so a previous-trial
+                                       # carry-over can't escalate it
+                                       # to an unreachable value
+
 
 def _per_cam_metrics(
     pose: Pose2DSeries,
@@ -140,26 +163,47 @@ def _per_cam_metrics(
     min_motion_speed_px: float,
     onset_baseline_s: float,
     onset_sigma: float,
+    hit_tolerance_norm: float,
 ) -> Optional[dict]:
     """Compute (rt_ms, mt_ms, err_norm) for one camera, or None if data
     is unusable (keypoint missing, target outside frame, etc.).
 
     Strategy:
       1. Map t_stim to a starting video-frame index using session timestamps.
-      2. Read the body-part trajectory for ``max_response_s`` after stim.
+      2. Read the body-part trajectory for ``max_response_s`` after stim,
+         masking out frames where visibility < 0.5.
       3. Detect motion onset = first frame where instantaneous speed
-         exceeds (baseline_speed + onset_sigma * baseline_std).
-      4. End-of-reach = frame of closest approach to the target after onset.
-      5. Spatial error = euclidean distance(end_pos, target) in normalised
+         exceeds (baseline_speed + onset_sigma * baseline_std), capped.
+      4. PROXIMITY FALLBACK — if no motion onset fires but the wrist
+         actually reaches inside ``hit_tolerance_norm * diag`` of the
+         target during the window, accept that frame as the end-of-reach
+         and use the first-near-target frame as a proxy onset. Catches
+         slow / smooth reaches that don't have a sharp onset spike.
+      5. End-of-reach = frame of closest approach to the target after onset.
+      6. Spatial error = euclidean distance(end_pos, target) in normalised
          image-diagonal units.
+
+    On no-response returns a dict with ``rt_ms=mt_ms=err_norm=None`` and
+    a ``failure_reason`` so callers can surface why the trial failed.
     """
+    def _empty(reason: str) -> dict:
+        return {
+            "cam_id":   pose.cam_id,
+            "rt_ms":    None,
+            "mt_ms":    None,
+            "err_norm": None,
+            "fps":      float(pose.fps) or 30.0,
+            "failure_reason": reason,
+        }
+
     img_w, img_h = pose.image_size
     if img_w <= 0 or img_h <= 0:
-        return None
+        return _empty("zero_image_size")
 
     diag = float(np.hypot(img_w, img_h))
     target_px = np.array([target_x_norm * img_w, target_y_norm * img_h],
                          dtype=np.float32)
+    hit_radius_px = float(hit_tolerance_norm) * diag
 
     fps = float(pose.fps) or 30.0
     i_stim = resolve_pose_frame(t_stim_s, session_dir, pose.cam_id, fps)
@@ -167,12 +211,10 @@ def _per_cam_metrics(
     n_base = max(3, int(onset_baseline_s * fps))
 
     n_total = pose.kpts_mp33.shape[0]
-    if i_stim >= n_total:
-        return None
+    if i_stim < 0 or i_stim >= n_total:
+        return _empty("out_of_video")
 
     # Baseline window — pre-stimulus speed (used for onset threshold).
-    # If we don't have enough frames before stim (e.g. stim near t=0),
-    # use a flat low default for the threshold.
     i_base0 = max(0, i_stim - n_base)
     pre_kpts = pose.kpts_mp33[i_base0:i_stim, kpt_index, :]
     if len(pre_kpts) >= 3:
@@ -185,8 +227,13 @@ def _per_cam_metrics(
     if len(speed_pre) >= 3:
         bl_mean = float(np.mean(speed_pre))
         bl_std  = float(np.std(speed_pre))
+        thr = bl_mean + onset_sigma * bl_std
+        # Floor: never below ``min_motion_speed_px``. Ceiling: cap at
+        # ``_THRESHOLD_PX_PER_FRAME_CAP`` so a still-moving baseline
+        # (carry-over from previous trial) can't push the threshold to
+        # an unreachable value.
         thr = max(min_motion_speed_px,
-                  bl_mean + onset_sigma * bl_std)
+                  min(thr, _THRESHOLD_PX_PER_FRAME_CAP))
     else:
         thr = float(min_motion_speed_px)
 
@@ -194,38 +241,69 @@ def _per_cam_metrics(
     i_end = min(n_total, i_stim + n_post)
     post_kpts = pose.kpts_mp33[i_stim:i_end, kpt_index, :]
     if len(post_kpts) < 3:
-        return None
+        return _empty("post_window_too_short")
 
-    # Per-frame instantaneous speed (px / frame). NaN preserved so
-    # invisible frames don't trigger false onsets.
+    # Visibility mask — both kpt-NaN AND vis<0.5 disqualify a frame so
+    # the offline analyzer applies the same gate as the live overlay.
+    post_vis = pose.vis_mp33[i_stim:i_end, kpt_index] \
+        if pose.vis_mp33 is not None else np.ones(len(post_kpts))
+    valid_mask = (~np.isnan(post_kpts).any(axis=1)) & (post_vis >= _VIS_THRESH)
+    if not valid_mask.any():
+        return _empty("no_visible_kpt")
+
+    # Per-frame instantaneous speed (px / frame). Frames with invalid
+    # endpoints get NaN speed so they're skipped at threshold check.
     d_post = np.diff(post_kpts, axis=0)
-    speed_post = np.linalg.norm(d_post, axis=1)
+    speed_post = np.linalg.norm(d_post, axis=1).astype(np.float32)
+    # Mask out frames where either endpoint was invisible
+    end_valid = valid_mask[1:] & valid_mask[:-1]
+    speed_post = np.where(end_valid, speed_post, np.nan)
 
     onset_rel: Optional[int] = None
-    for k, v in enumerate(speed_post):
+    for k in range(len(speed_post)):
+        v = float(speed_post[k])
         if np.isnan(v):
             continue
         if v >= thr:
             onset_rel = k
             break
+
+    # Distance trajectory — used for both end-of-reach and proximity
+    # fallback. ``inf`` for invalid frames so argmin ignores them.
+    dists = np.full(len(post_kpts), np.inf, dtype=np.float32)
+    dists[valid_mask] = np.linalg.norm(
+        post_kpts[valid_mask] - target_px, axis=1)
+    if not np.isfinite(dists).any():
+        return _empty("no_visible_kpt")
+
+    # PROXIMITY FALLBACK — when motion-onset detection failed, accept
+    # the trial if the wrist reached close to the target anyway. Slow,
+    # smooth reaches don't always trip the speed threshold, but the
+    # subject still completed the task (live overlay would have shown
+    # the green checkmark).
     if onset_rel is None:
-        return None
+        below_radius = dists <= hit_radius_px
+        if below_radius.any():
+            first_hit = int(np.argmax(below_radius))   # first True idx
+            # Use first_hit as the proxy onset; this gives a slightly
+            # conservative (later) RT than a true onset, but it
+            # accurately marks when the target was reached. MT
+            # reduces toward 0 since onset and end coincide.
+            onset_rel = first_hit
+            failure_reason = "ok_proximity_hit"
+        else:
+            # True no-response: no motion onset AND never reached
+            # within tolerance of the target.
+            return _empty("no_motion_no_hit")
+    else:
+        failure_reason = "ok_motion_onset"
 
     # End of reach = closest approach to target on or after onset.
-    # (NaN-bearing frames give NaN distance and are ignored by argmin.)
-    valid = ~np.isnan(post_kpts).any(axis=1)
-    if not valid.any():
-        return None
-    dists = np.full(len(post_kpts), np.inf, dtype=np.float32)
-    dists[valid] = np.linalg.norm(
-        post_kpts[valid] - target_px, axis=1)
-    # Restrict the search to onset onward so a noisy pre-onset frame
-    # accidentally near the target can't win.
     dists_after = np.full_like(dists, np.inf)
     dists_after[onset_rel:] = dists[onset_rel:]
     end_rel = int(np.argmin(dists_after))
     if not np.isfinite(dists_after[end_rel]):
-        return None
+        return _empty("no_visible_kpt_after_onset")
 
     rt_ms = onset_rel / fps * 1000.0
     mt_ms = max(0, (end_rel - onset_rel)) / fps * 1000.0
@@ -240,6 +318,8 @@ def _per_cam_metrics(
         "onset_frame": int(i_stim + onset_rel + 1),
         "end_frame":   int(i_stim + end_rel),
         "fps":      float(fps),
+        "threshold_px_per_frame": float(thr),
+        "failure_reason": failure_reason,
     }
 
 
@@ -284,8 +364,13 @@ def analyze_cognitive_reaction(
     *,
     body_part: str = "right_hand",
     n_positions: int = 4,
-    max_response_s: float = 1.5,
-    min_motion_speed_px: float = 4.0,
+    # V6-fix2 — defaults loosened from the V6 originals after observing
+    # 0-valid-trial runs in the field. RT 1.5 → 2.5 s window covers
+    # natural cognitive reaches (200-500 ms RT + 700-1500 ms MT). The
+    # speed threshold drops 4.0 → 2.0 px/frame so smooth slow reaches
+    # don't fall under the bar.
+    max_response_s: float = 2.5,
+    min_motion_speed_px: float = 2.0,
     onset_baseline_s: float = 0.4,
     onset_sigma: float = 3.0,
     hit_tolerance_norm: float = 0.12,
@@ -351,6 +436,7 @@ def analyze_cognitive_reaction(
                     min_motion_speed_px=min_motion_speed_px,
                     onset_baseline_s=onset_baseline_s,
                     onset_sigma=onset_sigma,
+                    hit_tolerance_norm=hit_tolerance_norm,
                 )
                 if m is not None:
                     per_cam.append(m)
@@ -363,6 +449,17 @@ def analyze_cognitive_reaction(
         total = (rt + mt) if (rt is not None and mt is not None) else None
         hit  = bool(err is not None and err <= hit_tolerance_norm)
 
+        # Pick a per-trial diagnostic. If any cam succeeded, use its
+        # reason; otherwise carry the first failure reason so the
+        # report can show why each trial failed.
+        trial_failure_reason: Optional[str] = None
+        if per_cam:
+            ok_cams = [c for c in per_cam if c.get("rt_ms") is not None]
+            if ok_cams:
+                trial_failure_reason = ok_cams[0].get("failure_reason")
+            else:
+                trial_failure_reason = per_cam[0].get("failure_reason")
+
         trials.append(CogTrial(
             trial_idx=i,
             target_label=label,
@@ -370,6 +467,7 @@ def analyze_cognitive_reaction(
             target_y_norm=ty,
             t_stim_s=float(ts),
             per_cam=per_cam,
+            failure_reason=trial_failure_reason,
             rt_ms=rt, mt_ms=mt, total_ms=total,
             spatial_error_norm=err,
             hit=hit,
@@ -422,6 +520,14 @@ def analyze_cognitive_reaction(
             "mean_err_norm":  float(np.mean(err_vals)) if err_vals else float("nan"),
         }
 
+    # V6-fix2 — failure-reason histogram so the report (and operator)
+    # can see why the no-response trials failed, instead of being told
+    # "n_valid=0" with no explanation.
+    failure_reason_counts: dict = {}
+    for t in trials:
+        key = t.failure_reason or "unknown"
+        failure_reason_counts[key] = failure_reason_counts.get(key, 0) + 1
+
     return CognitiveReactionResult(
         n_trials=len(trials),
         n_valid=len(valid),
@@ -440,6 +546,7 @@ def analyze_cognitive_reaction(
         n_positions=int(n_positions),
         per_target=per_target,
         trials=trials,
+        failure_reason_counts=failure_reason_counts,
     )
 
 

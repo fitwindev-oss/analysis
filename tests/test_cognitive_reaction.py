@@ -327,11 +327,6 @@ def test_per_cam_metrics_detects_motion_onset():
         move_dur_frames=24,
         img_size=(img_w, img_h),
     )
-    # Force-time-frame mapping: with no timestamps.csv, resolve_pose_frame
-    # falls back to ``(t_force + wait) * fps``. session_dir doesn't exist
-    # so wait_offset is 0 too. We pass session_dir = a non-existent path
-    # which makes resolve_pose_frame use the fps fallback (frame index =
-    # round(t_force * fps)).
     fake_dir = Path("/__nonexistent_session__")
     out = _per_cam_metrics(
         pose=pose, session_dir=fake_dir,
@@ -343,40 +338,86 @@ def test_per_cam_metrics_detects_motion_onset():
         min_motion_speed_px=2.0,
         onset_baseline_s=0.4,
         onset_sigma=3.0,
+        hit_tolerance_norm=0.12,
     )
     assert out is not None
+    assert out["rt_ms"] is not None
     # Motion onset should land within ~3 frames of frame 36 → ~200 ms RT.
     # Allow ±100 ms slack for the speed-threshold detection.
     assert 100.0 <= out["rt_ms"] <= 300.0
     # End-of-reach error should be negligible (we land exactly on target).
     assert out["err_norm"] < 1e-3
     assert out["mt_ms"] >= 0.0
+    # Standard motion-onset path
+    assert out["failure_reason"] == "ok_motion_onset"
 
 
-def test_per_cam_metrics_no_motion_returns_none():
-    """If the body part never moves, no onset → None."""
+def test_per_cam_metrics_no_motion_no_hit_returns_failure_reason():
+    """V6-fix2 — when wrist never moves AND never reaches the target,
+    return a dict (not None) carrying failure_reason='no_motion_no_hit'
+    so the report can show why the trial failed."""
     fps = 30.0
     img_w, img_h = 640, 480
     pose = _make_synthetic_pose(
         n_frames=60, fps=fps, kpt_index=MP33["right_wrist"],
-        start_xy=(0.5 * img_w, 0.5 * img_h),
-        move_start_frame=999,                    # never moves
-        move_end_xy=(0.5 * img_w, 0.5 * img_h),
+        start_xy=(0.10 * img_w, 0.10 * img_h),    # NW corner, far from target
+        move_start_frame=999,                       # never moves
+        move_end_xy=(0.10 * img_w, 0.10 * img_h),
         move_dur_frames=0,
         img_size=(img_w, img_h),
     )
     out = _per_cam_metrics(
         pose=pose, session_dir=Path("/__nonexistent__"),
-        t_stim_s=0.5, target_x_norm=0.85, target_y_norm=0.5,
+        t_stim_s=0.5,
+        target_x_norm=0.85, target_y_norm=0.50,    # east — far from NW
         kpt_index=MP33["right_wrist"],
         max_response_s=1.5, min_motion_speed_px=4.0,
         onset_baseline_s=0.3, onset_sigma=3.0,
+        hit_tolerance_norm=0.12,
     )
-    assert out is None
+    assert out is not None
+    assert out["rt_ms"] is None
+    assert out["failure_reason"] == "no_motion_no_hit"
 
 
-def test_per_cam_metrics_invalid_image_size_returns_none():
-    """Sanity: zero-sized images shouldn't divide by zero."""
+def test_per_cam_metrics_proximity_fallback_for_slow_reach():
+    """V6-fix2 — slow smooth reach without a sharp speed onset should
+    still be picked up via the proximity fallback when the wrist
+    actually arrives near the target."""
+    fps = 30.0
+    img_w, img_h = 640, 480
+    target_norm = (0.85, 0.50)
+    target_px = (target_norm[0] * img_w, target_norm[1] * img_h)
+    # Move VERY slowly: 60 frames to traverse, peak speed ~1.4 px/frame
+    # (below the 2.0 default threshold).
+    pose = _make_synthetic_pose(
+        n_frames=120, fps=fps, kpt_index=MP33["right_wrist"],
+        start_xy=(0.50 * img_w, 0.50 * img_h),
+        move_start_frame=30,
+        move_end_xy=target_px,
+        move_dur_frames=60,                        # slow reach
+        img_size=(img_w, img_h),
+    )
+    out = _per_cam_metrics(
+        pose=pose, session_dir=Path("/__none__"),
+        t_stim_s=1.0,
+        target_x_norm=target_norm[0],
+        target_y_norm=target_norm[1],
+        kpt_index=MP33["right_wrist"],
+        max_response_s=3.0, min_motion_speed_px=4.0,  # high speed threshold
+        onset_baseline_s=0.4, onset_sigma=3.0,
+        hit_tolerance_norm=0.12,
+    )
+    assert out is not None
+    # Motion onset would have failed (peak speed too low), but the
+    # proximity fallback picks up the trial because the wrist
+    # reached close to the target.
+    assert out["rt_ms"] is not None
+    assert out["failure_reason"] == "ok_proximity_hit"
+
+
+def test_per_cam_metrics_invalid_image_size_returns_failure_reason():
+    """Sanity: zero-sized images return a failure dict (not None)."""
     pose = _make_synthetic_pose(
         n_frames=30, fps=30.0, kpt_index=MP33["right_wrist"],
         start_xy=(0.0, 0.0), move_start_frame=10,
@@ -389,8 +430,79 @@ def test_per_cam_metrics_invalid_image_size_returns_none():
         kpt_index=MP33["right_wrist"],
         max_response_s=1.0, min_motion_speed_px=4.0,
         onset_baseline_s=0.3, onset_sigma=3.0,
+        hit_tolerance_norm=0.12,
     )
-    assert out is None
+    assert out is not None
+    assert out["rt_ms"] is None
+    assert out["failure_reason"] == "zero_image_size"
+
+
+def test_per_cam_metrics_low_visibility_returns_failure_reason():
+    """V6-fix2 — keypoint with visibility below 0.5 across the entire
+    post-window must produce a 'no_visible_kpt' diagnostic."""
+    fps = 30.0
+    img_w, img_h = 640, 480
+    pose = _make_synthetic_pose(
+        n_frames=60, fps=fps, kpt_index=MP33["right_wrist"],
+        start_xy=(0.50 * img_w, 0.50 * img_h),
+        move_start_frame=20, move_end_xy=(0.85 * img_w, 0.50 * img_h),
+        move_dur_frames=20, img_size=(img_w, img_h),
+    )
+    # Tank visibility everywhere — analyzer must skip the trial.
+    pose.vis_mp33[:, MP33["right_wrist"]] = 0.0
+    out = _per_cam_metrics(
+        pose=pose, session_dir=Path("/x"),
+        t_stim_s=0.5, target_x_norm=0.85, target_y_norm=0.50,
+        kpt_index=MP33["right_wrist"],
+        max_response_s=1.5, min_motion_speed_px=2.0,
+        onset_baseline_s=0.3, onset_sigma=3.0,
+        hit_tolerance_norm=0.12,
+    )
+    assert out is not None
+    assert out["rt_ms"] is None
+    assert out["failure_reason"] == "no_visible_kpt"
+
+
+def test_threshold_capped_when_baseline_noisy():
+    """Carry-over motion in the baseline window must not drive the
+    onset threshold above the cap. We construct a pose where the wrist
+    is moving fast in the pre-stim window (200 px/frame), then briefly
+    accelerates slightly post-stim. Without the cap, onset_sigma * std
+    would push thr ≫ post-stim speed and the trial would no-respond."""
+    fps = 30.0
+    img_w, img_h = 640, 480
+    n_frames = 90
+    kpts = np.full((n_frames, 33, 2), np.nan, dtype=np.float32)
+    vis  = np.zeros((n_frames, 33), dtype=np.float32)
+    wrist = MP33["right_wrist"]
+    # Pre-stim (frames 0-29): wrist oscillates wildly across X
+    rng = np.random.default_rng(0)
+    xs = 320.0 + rng.uniform(-200.0, 200.0, size=n_frames).astype(np.float32)
+    ys = np.full(n_frames, 240.0, dtype=np.float32)
+    # Post-stim (frames 30+): clean reach toward target
+    target_x = 0.85 * img_w
+    xs[30:55] = np.linspace(320.0, target_x, 25)
+    xs[55:] = target_x
+    kpts[:, wrist, 0] = xs; kpts[:, wrist, 1] = ys
+    vis[:, wrist] = 1.0
+    pose = Pose2DSeries(
+        cam_id="cam0", kpts_mp33=kpts, vis_mp33=vis,
+        world_mp33=np.full((n_frames, 33, 3), np.nan, dtype=np.float32),
+        angles=np.full((n_frames, 12), np.nan, dtype=np.float32),
+        angle_names=[], fps=fps, image_size=(img_w, img_h))
+    out = _per_cam_metrics(
+        pose=pose, session_dir=Path("/x"),
+        t_stim_s=1.0,                                # frame 30
+        target_x_norm=0.85, target_y_norm=0.50,
+        kpt_index=wrist,
+        max_response_s=2.0, min_motion_speed_px=2.0,
+        onset_baseline_s=0.4, onset_sigma=3.0,
+        hit_tolerance_norm=0.12,
+    )
+    assert out is not None
+    # Threshold should be capped to the configured ceiling (30 px/frame),
+    # not the much larger value baseline noise would dictate.
+    assert out["threshold_px_per_frame"] <= 30.0 + 1e-6
 
 
 # ────────────────────────────────────────────────────────────────────────────
