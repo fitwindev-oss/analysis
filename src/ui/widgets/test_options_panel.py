@@ -73,6 +73,12 @@ class TestOptionsPanel(QWidget):
         """
         test = self.current_test()
         is_balance = test in ("balance_eo", "balance_ec")
+        # Phase V6 — cognitive_reaction is fundamentally pose-driven: the
+        # analyzer extracts RT/MT/spatial-accuracy from the body-part
+        # trajectory in poses_*.npz. Without auto-pose enabled the
+        # session lands as "0 valid trials" because the analyzer has no
+        # pose data to read. Force pose-on regardless of the checkbox.
+        force_auto_pose = (test == "cognitive_reaction")
         opts: dict = {
             "test":           test,
             "duration_s":     self._duration.value(),
@@ -82,7 +88,7 @@ class TestOptionsPanel(QWidget):
             # For balance tests the encoder flag is meaningless; force True
             # so the RecorderConfig default holds and meta serializes None.
             "uses_encoder":   True if is_balance else self._uses_enc.isChecked(),
-            "_auto_pose":         self._auto_pose.isChecked(),
+            "_auto_pose":         force_auto_pose or self._auto_pose.isChecked(),
             "_post_complexity":   int(self._post_complexity.currentData() or 1),
             "_live_pose":         self._live_pose.isChecked(),
             "_live_complexity":   int(self._live_complexity.currentData() or 0),
@@ -448,12 +454,29 @@ class TestOptionsPanel(QWidget):
         self._balance_box.setVisible(is_balance)
         self._reaction_box.setVisible(test == "reaction")
         # V6 — cognitive reaction has its own option group
-        self._cognitive_box.setVisible(test == "cognitive_reaction")
+        is_cog = (test == "cognitive_reaction")
+        self._cognitive_box.setVisible(is_cog)
         # Encoder-usage checkbox is not applicable to balance tests.
         # cognitive_reaction also doesn't involve a bar/rod.
-        self._uses_enc.setVisible(not is_balance and test != "cognitive_reaction")
+        self._uses_enc.setVisible(not is_balance and not is_cog)
         self._free_box.setVisible(test == "free_exercise")
         self._strength_box.setVisible(is_strength)
+        # V6 — pose processing is mandatory for cognitive_reaction. Lock
+        # the checkbox on + tooltip explains why so the operator can't
+        # accidentally turn it off and produce an empty result.
+        if is_cog:
+            self._auto_pose.setChecked(True)
+            self._auto_pose.setEnabled(False)
+            self._auto_pose.setToolTip(
+                "시각/인지 반응 검사는 스켈레톤(MediaPipe)으로 손/발 궤적을 "
+                "추적해 RT/MT/공간정확도를 산출하기 때문에 자동 포즈 처리가 "
+                "필수입니다. 비활성화 불가.")
+        else:
+            self._auto_pose.setEnabled(True)
+            self._auto_pose.setToolTip(
+                "녹화된 mp4에서 MediaPipe BlazePose로 33개 관절을 추정하고, "
+                "분석 리포트에 12개 관절 각도를 포함시킵니다.\n"
+                "실패해도 Force 분석 결과는 보존됩니다.")
         # strength_3lift is operator-driven (multi-set); the global
         # duration_s is unused. Hide the duration row to avoid confusion.
         self._duration.setEnabled(not is_strength)

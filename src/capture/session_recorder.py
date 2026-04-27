@@ -549,18 +549,26 @@ class SessionRecorder:
         # DAQ
         self._daq = DaqReader()
         # Phase V6 fix — smart-wait is a force-plate stance gate (waits
-        # until both feet are stable on the plate). For tests where the
-        # subject doesn't stand on the plate at all, leaving smart-wait
-        # on means the recorder hangs forever in the "wait" phase. The
-        # cognitive_reaction test is a hand/foot reach test driven by
-        # screen cues — there's no force-plate stance to wait for, so
-        # we always skip the StabilityDetector for it (regardless of the
-        # use_smart_wait UI flag) and the run-loop falls straight into
-        # the fixed countdown_s before recording starts.
+        # until both feet are stable on the plate). The cognitive_reaction
+        # test is a hand/foot reach driven by screen cues — there's no
+        # force-plate stance to evaluate, so we skip StabilityDetector
+        # for it. But we STILL need the recorder to wait out the DAQ
+        # zero-cal (5 s) before recording begins, otherwise the first
+        # ~0.5-1.5 s of forces.csv contains pre-cal noise that shows up
+        # in replay even though the analyzer doesn't use it. The
+        # ``_zero_cal_only`` flag below makes the wait phase do exactly
+        # that — show the zero-cal countdown, then auto-transition to
+        # the fixed countdown without ever consulting a stability
+        # detector. Net effect: cognitive_reaction sessions get a clean
+        # ``wait → countdown → recording`` flow with the same noise-free
+        # baseline guarantee as balance/CMJ.
         wants_smart_wait = (
             self.cfg.use_smart_wait
             and self.cfg.test != "cognitive_reaction"
         )
+        self._zero_cal_only: bool = (
+            self.cfg.test == "cognitive_reaction"
+            and self.cfg.use_smart_wait)
         if wants_smart_wait:
             stance_mode = self.cfg.stance if self.cfg.test in (
                 "balance_eo", "balance_ec") else "two"
@@ -571,10 +579,11 @@ class SessionRecorder:
                 timeout_s=self.cfg.wait_timeout_s,
                 stance_mode=stance_mode,
             )
-        elif self.cfg.use_smart_wait and self.cfg.test == "cognitive_reaction":
+        elif self._zero_cal_only:
             self._log(
-                "smart-wait skipped for cognitive_reaction "
-                "(no force-plate stance involved)")
+                "smart-wait → zero-cal-only for cognitive_reaction "
+                "(no plate stance, but waits out DAQ zero-cal so "
+                "forces.csv baseline is clean)")
         if self._daq.connect():
             def _on_daq(fr: DaqFrame) -> None:
                 # Single reference assignment is atomic in CPython, so
@@ -619,9 +628,10 @@ class SessionRecorder:
     def _loop(self) -> None:
         cfg = self.cfg
         # Initial phase
-        if self._stability is not None:
+        if self._stability is not None or getattr(self, "_zero_cal_only", False):
             self._state.phase = "wait"
-            # Give DAQ ~5 s to finish zero-cal
+            # Give DAQ ~5.5 s to finish zero-cal (config.ZERO_CAL_SECONDS
+            # is 5 s; +0.5 s margin covers DAQ thread start-up jitter).
             stability_arm_ns = time.monotonic_ns() + int(5.5e9)
         else:
             self._state.phase = "countdown"
@@ -694,6 +704,16 @@ class SessionRecorder:
         # momentarily has no fresh frame, we don't flip the banner back.
         self._state.zeroing = False
         self._state.zero_cal_remaining_s = 0.0
+        # Phase V6 — cognitive_reaction has no stance to evaluate. Once
+        # zero-cal completes we auto-transition to the fixed countdown,
+        # so the run-loop can never get stuck waiting for a "READY"
+        # stance that wouldn't apply.
+        if getattr(self, "_zero_cal_only", False):
+            self._wait_duration_s = phase_s
+            self._state.phase = "countdown"
+            self._t_phase_ns = now_ns
+            self._log("zero-cal complete → countdown")
+            return
         frame = self._daq_latest_frame
         if frame is None:
             return

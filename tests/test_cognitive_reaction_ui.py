@@ -90,6 +90,34 @@ def test_options_panel_visibility_toggles_on_test_change():
     assert not panel._balance_box.isVisibleTo(panel)
 
 
+def test_options_panel_forces_auto_pose_for_cognitive_reaction():
+    """V6-fix — pose processing is mandatory for cognitive_reaction
+    because the analyzer reads body-part trajectories from poses_*.npz.
+    options() must emit ``_auto_pose=True`` for cognitive_reaction even
+    if the operator left the auto-pose checkbox cleared."""
+    panel = TestOptionsPanel()
+    # First select something else and uncheck auto-pose
+    panel._combo.setCurrentIndex(panel._combo.findData("balance_eo"))
+    panel._auto_pose.setChecked(False)
+    # Now switch to cognitive_reaction
+    panel._combo.setCurrentIndex(panel._combo.findData("cognitive_reaction"))
+    opts = panel.options()
+    assert opts["_auto_pose"] is True
+    # And the checkbox should be locked on (visual cue for the operator).
+    assert panel._auto_pose.isChecked() is True
+    assert panel._auto_pose.isEnabled() is False
+
+
+def test_auto_pose_unlocks_when_leaving_cognitive_reaction():
+    """Switching off cognitive_reaction must re-enable the auto-pose
+    checkbox so other tests can opt out as before."""
+    panel = TestOptionsPanel()
+    panel._combo.setCurrentIndex(panel._combo.findData("cognitive_reaction"))
+    assert panel._auto_pose.isEnabled() is False
+    panel._combo.setCurrentIndex(panel._combo.findData("cmj"))
+    assert panel._auto_pose.isEnabled() is True
+
+
 def test_options_panel_kwargs_pass_through_recorderconfig():
     """The dict that TestOptionsPanel.options() returns (after stripping
     the UI-only ``_*`` keys) must construct a valid RecorderConfig."""

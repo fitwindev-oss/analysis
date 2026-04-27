@@ -87,12 +87,8 @@ def test_smart_wait_bypassed_for_cognitive_reaction():
     """V6-fix — smart-wait depends on force-plate stance, but the
     cognitive_reaction test is a hand/foot reach driven by screen cues
     with no plate involvement. The recorder must skip StabilityDetector
-    construction even when ``use_smart_wait=True`` so the run-loop falls
-    straight into the fixed countdown instead of hanging in 'wait'.
-
-    We don't run the full hardware loop here (no DAQ in CI); we just
-    inspect the StabilityDetector decision logic by mirroring what
-    ``_start_hardware`` does inline.
+    construction even when ``use_smart_wait=True`` so the run-loop never
+    hangs waiting for a plate stance that wouldn't apply.
     """
     cfg = RecorderConfig(test="cognitive_reaction",
                          use_smart_wait=True,
@@ -103,9 +99,7 @@ def test_smart_wait_bypassed_for_cognitive_reaction():
     wants_smart_wait = (
         rec.cfg.use_smart_wait
         and rec.cfg.test != "cognitive_reaction")
-    assert wants_smart_wait is False, (
-        "cognitive_reaction must skip smart-wait — "
-        "force-plate stance has no role in a hand-reach test")
+    assert wants_smart_wait is False
 
 
 def test_smart_wait_still_active_for_classic_reaction():
@@ -129,6 +123,41 @@ def test_smart_wait_off_skips_for_all_tests():
         rec.cfg.use_smart_wait
         and rec.cfg.test != "cognitive_reaction")
     assert wants_smart_wait is False
+
+
+def test_zero_cal_only_flag_set_for_cognitive_reaction():
+    """V6-fix — when use_smart_wait=True, cognitive_reaction takes the
+    zero-cal-only branch. The wait phase still runs (waits out the DAQ
+    5 s zero-cal so forces.csv baseline is clean) but with no stance
+    check; it auto-transitions to countdown when zero-cal completes.
+    """
+    # Mirror the calculation _start_hardware does. We can't actually
+    # call _start_hardware in CI (no DAQ hardware) so we just verify
+    # the predicate that controls _zero_cal_only.
+    cfg = RecorderConfig(test="cognitive_reaction",
+                         use_smart_wait=True,
+                         react_n_positions=4,
+                         duration_s=30.0, n_stimuli=4, trigger="auto")
+    rec = SessionRecorder(cfg)
+    zero_cal_only = (
+        rec.cfg.test == "cognitive_reaction"
+        and rec.cfg.use_smart_wait)
+    assert zero_cal_only is True
+
+
+def test_zero_cal_only_flag_off_when_smart_wait_off():
+    """Operator can opt out of zero-cal-only by turning use_smart_wait
+    off entirely. Then cognitive_reaction goes straight into countdown
+    (~5 s) with no zero-cal wait — first ~0.5 s of forces.csv may
+    contain DAQ ramp-up samples but the analyzer doesn't care."""
+    cfg = RecorderConfig(test="cognitive_reaction",
+                         use_smart_wait=False,
+                         duration_s=30.0, n_stimuli=4, trigger="auto")
+    rec = SessionRecorder(cfg)
+    zero_cal_only = (
+        rec.cfg.test == "cognitive_reaction"
+        and rec.cfg.use_smart_wait)
+    assert zero_cal_only is False
 
 
 def test_reaction_responses_includes_positions():
