@@ -227,6 +227,15 @@ class RecorderState:
     zero_cal_remaining_s: float = 0.0  # countdown during zero-cal
     stim_banner: Optional[str] = None
     n_stim_fired: int = 0
+    # ── Cognitive reaction positional cue (Phase V6-UI) ────────────────
+    # When the active stim is a positional cue (cognitive_reaction test),
+    # these carry the on-screen target so the GUI's CameraView can draw
+    # an LED-style ring at exactly the cued spot. Cleared together with
+    # ``stim_banner`` when the cue's display window expires. Coordinates
+    # are normalised image space (0..1, origin top-left).
+    cog_target_x_norm:  Optional[float] = None
+    cog_target_y_norm:  Optional[float] = None
+    cog_target_label:   Optional[str]   = None
     # ── Multi-set strength assessment (Phase V1-D) ─────────────────────
     # Populated only when test == "strength_3lift". The current set
     # being recorded (or just rested between) and the rest countdown.
@@ -750,6 +759,11 @@ class SessionRecorder:
         if now_ns / 1e9 >= self._stim_banner_until:
             self._state.stim_banner = None
             self._stim_banner_type = None
+            # V6 — clear the positional cue too so the camera overlay
+            # stops drawing the LED ring at expiry.
+            self._state.cog_target_x_norm = None
+            self._state.cog_target_y_norm = None
+            self._state.cog_target_label  = None
 
         # Fall-off detection for balance tests: total_n below 30%BW for
         # >= 2 s contiguous → abort the recording. Rationale: a subject
@@ -909,13 +923,19 @@ class SessionRecorder:
         # held on screen for ~1.5 s (longer than reaction's 0.5 s) so
         # the subject has time to reach.
         cog_lookup = getattr(self, "_cog_pos_lookup", None)
-        if (self.cfg.test == "cognitive_reaction"
-                and cog_lookup is not None
-                and response_type in cog_lookup):
+        is_cog_pos = (
+            self.cfg.test == "cognitive_reaction"
+            and cog_lookup is not None
+            and response_type in cog_lookup)
+        if is_cog_pos:
             tx, ty = cog_lookup[response_type]
             ev["target_x_norm"] = tx
             ev["target_y_norm"] = ty
             ev["target_label"]  = response_type
+            # Mirror into RecorderState so the GUI can draw the cue ring.
+            self._state.cog_target_x_norm = float(tx)
+            self._state.cog_target_y_norm = float(ty)
+            self._state.cog_target_label  = response_type
         self._stim_events.append(ev)
         self._state.n_stim_fired = len(self._stim_events)
         # Hold the visual cue longer for cognitive_reaction (subject

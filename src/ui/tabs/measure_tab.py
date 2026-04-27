@@ -571,7 +571,9 @@ class MeasureTab(QWidget):
         self._protocol_box.setVisible(not single_on)
 
     def _on_test_changed(self, test_key: str) -> None:
-        self._manual_box.setVisible(test_key == "reaction")
+        # Manual reaction buttons box — visible for classic reaction
+        # AND V6 cognitive_reaction (Space = random positional cue).
+        self._manual_box.setVisible(test_key in ("reaction", "cognitive_reaction"))
         # Squat / overhead squat expose the VRT cue button (Phase S1d).
         self._vrt_box.setVisible(test_key in ("squat", "overhead_squat"))
         # Strength 3-lift exposes the multi-set control box (Phase V1-E).
@@ -885,6 +887,15 @@ class MeasureTab(QWidget):
         # Multi-set strength: refresh button enables + indicator label
         # whenever the state ticks. (Cheap — just label text + setEnabled.)
         self._refresh_strength_controls(st)
+        # V6 — forward the positional cue (cognitive_reaction) to the
+        # camera preview. Recorder clears the cue when the stim banner
+        # expires; passing None in either coord tells CameraView to hide
+        # the ring. No-op for tests that never set the fields.
+        self._camera_view.set_positional_cue(
+            getattr(st, "cog_target_x_norm", None),
+            getattr(st, "cog_target_y_norm", None),
+            getattr(st, "cog_target_label",  None),
+        )
 
     def _on_finished(self, result: dict) -> None:
         # Realtime overlay no longer needed — kill the live worker
@@ -1194,9 +1205,16 @@ class MeasureTab(QWidget):
         protocol_active = active and len(self._protocol_queue) > 1
         self._btn_abort.setEnabled(protocol_active)
         self._options.setEnabled(not active)
-        for b in (self._btn_left, self._btn_right,
-                  self._btn_jump, self._btn_rand):
+        # Reaction's directional buttons (left/right/jump) only apply to
+        # the classic "reaction" test; cognitive_reaction uses positional
+        # cues so a random-pick (Space) is enough.
+        for b in (self._btn_left, self._btn_right, self._btn_jump):
             b.setEnabled(running and self._options.current_test() == "reaction")
+        # Random-pick button + Space shortcut work for both reaction and
+        # cognitive_reaction (in either auto or manual trigger).
+        self._btn_rand.setEnabled(
+            running and self._options.current_test()
+            in ("reaction", "cognitive_reaction"))
         # VRT cue button — enabled while recording a squat test.
         self._btn_vrt_cue.setEnabled(
             running and self._options.current_test()

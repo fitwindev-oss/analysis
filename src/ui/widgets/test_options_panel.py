@@ -29,8 +29,14 @@ TESTS_KO: list[tuple[str, str, float]] = [
     ("sj",             "SJ (스쿼트 점프, 반동 없음)", 10.0),
     ("squat",          "스쿼트",               30.0),
     ("overhead_squat", "오버헤드 스쿼트",      30.0),
-    ("reaction",       "반응 시간",            60.0),
-    ("proprio",        "고유감각",             60.0),
+    ("reaction",            "반응 시간",                       60.0),
+    # V6 — visual + cognitive reaction with positional cues + skeleton
+    # tracking. The screen flashes a target spot (N/E/S/W or N/NE/.../NW);
+    # subject must reach it with the configured body part. Pose pipeline
+    # extracts RT (stim → motion onset), MT (onset → arrival) and the
+    # spatial accuracy of the reach.
+    ("cognitive_reaction",  "시각/인지 반응 (위치 큐 + 스켈레톤)", 60.0),
+    ("proprio",             "고유감각",                        60.0),
     ("free_exercise",  "자유 운동 측정",       60.0),
     ("strength_3lift", "전신 근력 (3대 운동)", 0.0),
 ]
@@ -91,6 +97,17 @@ class TestOptionsPanel(QWidget):
             opts["stim_max_gap"] = self._stim_max.value()
             opts["trigger"]      = "manual" if self._trigger_manual.isChecked() else "auto"
             opts["responses"]    = self._responses_str()
+        if test == "cognitive_reaction":
+            # V6 — reuses n_stimuli / stim_min_gap / stim_max_gap from the
+            # cognitive group so timing semantics are identical to ``reaction``.
+            opts["n_stimuli"]    = self._cog_n_stim.value()
+            opts["stim_min_gap"] = self._cog_stim_min.value()
+            opts["stim_max_gap"] = self._cog_stim_max.value()
+            opts["trigger"]      = "manual" if self._cog_trigger_manual.isChecked() else "auto"
+            opts["react_track_body_part"] = (
+                self._cog_body_part.currentData() or "right_hand")
+            opts["react_n_positions"] = (
+                8 if self._cog_pos_8.isChecked() else 4)
         if test == "free_exercise":
             opts["exercise_name"]       = self._free_name.text().strip() or None
             opts["load_kg"]             = float(self._free_load.value())
@@ -270,6 +287,60 @@ class TestOptionsPanel(QWidget):
         rl.addRow("응답 유형", self._wrap_layout(resp_row))
         root.addWidget(self._reaction_box)
 
+        # ── Cognitive reaction (Phase V6-UI) ────────────────────────────────
+        # Visual+cognitive RT with on-screen positional cue + skeleton-based
+        # reach tracking. The "응답 유형" concept doesn't apply (every cue
+        # IS its own response — a position to reach), so the form is
+        # narrower: body part, n_positions, stim count + gaps + trigger.
+        self._cognitive_box = QGroupBox("시각/인지 반응 옵션 (V6)")
+        cl = QFormLayout(self._cognitive_box)
+
+        self._cog_body_part = QComboBox()
+        self._cog_body_part.addItem("오른손 (Right Hand)", "right_hand")
+        self._cog_body_part.addItem("왼손 (Left Hand)",    "left_hand")
+        self._cog_body_part.addItem("오른발 (Right Foot)", "right_foot")
+        self._cog_body_part.addItem("왼발 (Left Foot)",    "left_foot")
+        self._cog_body_part.setToolTip(
+            "위치 큐를 향해 이동시킬 신체 부위. MediaPipe BlazePose의 33개 "
+            "키포인트 중 손목/검지(손) 또는 발끝/발목(발)을 추적합니다.")
+        cl.addRow("추적 부위", self._cog_body_part)
+
+        pos_row = QHBoxLayout()
+        self._cog_pos_4 = QRadioButton("4 방향 (N/E/S/W)")
+        self._cog_pos_8 = QRadioButton("8 방향 (N/NE/E/SE/S/SW/W/NW)")
+        self._cog_pos_4.setChecked(True)
+        self._cog_pos_group = QButtonGroup(self)
+        for b in (self._cog_pos_4, self._cog_pos_8):
+            self._cog_pos_group.addButton(b)
+            pos_row.addWidget(b)
+        pos_row.addStretch(1)
+        cl.addRow("위치 수", self._wrap_layout(pos_row))
+
+        self._cog_n_stim = QSpinBox()
+        self._cog_n_stim.setRange(1, 100); self._cog_n_stim.setValue(10)
+        cl.addRow("자극 횟수", self._cog_n_stim)
+        self._cog_stim_min = QDoubleSpinBox()
+        self._cog_stim_min.setRange(0.5, 30.0); self._cog_stim_min.setValue(2.5)
+        self._cog_stim_min.setSuffix(" s")
+        cl.addRow("자극 간 최소 간격", self._cog_stim_min)
+        self._cog_stim_max = QDoubleSpinBox()
+        self._cog_stim_max.setRange(0.5, 30.0); self._cog_stim_max.setValue(5.0)
+        self._cog_stim_max.setSuffix(" s")
+        cl.addRow("자극 간 최대 간격", self._cog_stim_max)
+
+        cog_trig_row = QHBoxLayout()
+        self._cog_trigger_auto   = QRadioButton("자동 (사전 스케줄)")
+        self._cog_trigger_manual = QRadioButton("수동 (운영자 키 입력)")
+        self._cog_trigger_auto.setChecked(True)
+        self._cog_trigger_group = QButtonGroup(self)
+        for b in (self._cog_trigger_auto, self._cog_trigger_manual):
+            self._cog_trigger_group.addButton(b)
+            cog_trig_row.addWidget(b)
+        cog_trig_row.addStretch(1)
+        cl.addRow("트리거", self._wrap_layout(cog_trig_row))
+
+        root.addWidget(self._cognitive_box)
+
         # Free exercise — exercise name + external load + bodyweight override
         self._free_box = QGroupBox("자유 운동 옵션")
         fl = QFormLayout(self._free_box)
@@ -376,8 +447,11 @@ class TestOptionsPanel(QWidget):
         is_strength = (test == "strength_3lift")
         self._balance_box.setVisible(is_balance)
         self._reaction_box.setVisible(test == "reaction")
+        # V6 — cognitive reaction has its own option group
+        self._cognitive_box.setVisible(test == "cognitive_reaction")
         # Encoder-usage checkbox is not applicable to balance tests.
-        self._uses_enc.setVisible(not is_balance)
+        # cognitive_reaction also doesn't involve a bar/rod.
+        self._uses_enc.setVisible(not is_balance and test != "cognitive_reaction")
         self._free_box.setVisible(test == "free_exercise")
         self._strength_box.setVisible(is_strength)
         # strength_3lift is operator-driven (multi-set); the global
