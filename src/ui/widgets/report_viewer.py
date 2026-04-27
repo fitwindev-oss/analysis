@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
 )
 
 from src.ui.workers.excel_export_worker import ExcelExportWorker
+from src.ui.workers.csv_export_worker import CsvExportWorker
 from src.ui.workers.pdf_export_worker import PdfExportWorker
 
 # New report system
@@ -252,6 +253,15 @@ class ReportViewer(QWidget):
             "(단축키 Ctrl+E)")
         self._btn_excel.clicked.connect(self._on_excel_clicked)
 
+        self._btn_csv = QPushButton("📝 CSV 내보내기")
+        self._btn_csv.setToolTip(
+            "메모장으로 바로 열 수 있는 UTF-8 CSV로 내보냅니다.\n"
+            "Excel 내보내기와 동일한 데이터를 평문으로 저장하며, 시간 옆에\n"
+            "이벤트 컬럼(자극, 이탈)이 배치됩니다.\n"
+            "  • <name>_timeseries.csv   — 100 Hz force + 보간 포즈\n"
+            "  • <name>_pose_native.csv  — 네이티브 fps 포즈 (포즈 있을 때)")
+        self._btn_csv.clicked.connect(self._on_csv_clicked)
+
         self._btn_pdf = QPushButton("📄 PDF 내보내기")
         self._btn_pdf.setToolTip(
             "현재 선택된 '리포트 유형' (트레이너용/피험자용) 으로 PDF를 생성합니다.\n"
@@ -261,6 +271,7 @@ class ReportViewer(QWidget):
         actions_row.addWidget(self._btn_analyze)
         actions_row.addWidget(self._btn_pose)
         actions_row.addWidget(self._btn_excel)
+        actions_row.addWidget(self._btn_csv)
         actions_row.addWidget(self._btn_pdf)
         actions_row.addStretch(1)
         root.addLayout(actions_row)
@@ -275,6 +286,7 @@ class ReportViewer(QWidget):
 
         # Export worker references (kept alive while running)
         self._excel_worker: Optional[ExcelExportWorker] = None
+        self._csv_worker:   Optional[CsvExportWorker]   = None
         self._pdf_worker:   Optional[PdfExportWorker]   = None
 
     # ── public API ─────────────────────────────────────────────────────────
@@ -290,13 +302,15 @@ class ReportViewer(QWidget):
         self._btn_analyze.setEnabled(False)
         self._btn_pose.setEnabled(False)
         self._btn_excel.setEnabled(False)
+        self._btn_csv.setEnabled(False)
         self._btn_pdf.setEnabled(False)
         self._btn_replay.setEnabled(False)
         self._btn_folder.setEnabled(False)
         # Context-aware tooltip — explain why the buttons are disabled.
         no_sel = "좌측 세션 리스트에서 세션을 먼저 선택하세요."
         for b in (self._btn_analyze, self._btn_pose, self._btn_excel,
-                  self._btn_pdf, self._btn_replay, self._btn_folder):
+                  self._btn_csv, self._btn_pdf, self._btn_replay,
+                  self._btn_folder):
             b.setToolTip(no_sel)
 
     def show_session(self, session_dir: str, test_type: str,
@@ -319,6 +333,7 @@ class ReportViewer(QWidget):
         self._btn_analyze.setEnabled(True)
         self._btn_pose.setEnabled(True)
         self._btn_excel.setEnabled(True)
+        self._btn_csv.setEnabled(True)
         self._btn_replay.setEnabled(True)
         self._btn_folder.setEnabled(True)
         # Restore the informative tooltips (may have been overwritten by
@@ -334,6 +349,10 @@ class ReportViewer(QWidget):
             "세션의 힘/CoP/관절 좌표·속도·각도·각속도 로우를 단일 xlsx로 내보냅니다.\n"
             "TimeSeries 시트(100 Hz 통일) + Pose_native + Summary + Per_rep 구성.\n"
             "(단축키 Ctrl+E)")
+        self._btn_csv.setToolTip(
+            "메모장으로 바로 열 수 있는 UTF-8 CSV로 내보냅니다.\n"
+            "Excel 내보내기와 동일한 데이터를 평문으로 저장하며, 시간 옆에\n"
+            "이벤트 컬럼(자극, 이탈)이 배치됩니다.")
         self._btn_pdf.setToolTip(
             "현재 선택된 '리포트 유형' (트레이너용/피험자용) 으로 PDF를 생성합니다.\n"
             "(단축키 Ctrl+P)")
@@ -556,6 +575,51 @@ class ReportViewer(QWidget):
                 f"  • forces.csv 또는 pose 파일이 손상됨"
             )
             self._excel_worker = None
+
+        worker.finished_ok.connect(_on_done)
+        worker.failed.connect(_on_fail)
+        worker.start()
+
+    # ── CSV export (Notepad-friendly, same data as Excel) ─────────────────
+    def _on_csv_clicked(self) -> None:
+        if not self._session_dir:
+            return
+        if self._csv_worker is not None and self._csv_worker.isRunning():
+            return
+        sd = Path(self._session_dir)
+        default_path = str(sd / f"{sd.name}_timeseries.csv")
+        chosen, _ = QFileDialog.getSaveFileName(
+            self, "CSV 파일 저장 위치", default_path,
+            "CSV files (*.csv)",
+        )
+        if not chosen:
+            return
+        self._btn_csv.setEnabled(False)
+        self._btn_csv.setText("📝 CSV 생성 중…")
+        worker = CsvExportWorker(self._session_dir, chosen, parent=self)
+        self._csv_worker = worker
+
+        def _on_done(ts_path: str, pose_path: str) -> None:
+            self._btn_csv.setEnabled(True)
+            self._btn_csv.setText("📝 CSV 내보내기")
+            extra = f"\n포즈 (네이티브 fps):\n{pose_path}" if pose_path else ""
+            QMessageBox.information(
+                self, "CSV 내보내기 완료",
+                f"저장됨:\n{ts_path}{extra}")
+            self._csv_worker = None
+
+        def _on_fail(err: str) -> None:
+            self._btn_csv.setEnabled(True)
+            self._btn_csv.setText("📝 CSV 내보내기")
+            QMessageBox.warning(
+                self, "CSV 내보내기 실패",
+                f"{err}\n\n"
+                f"가능한 원인:\n"
+                f"  • 대상 csv가 다른 프로그램에서 열려 있음\n"
+                f"  • 저장 위치에 쓰기 권한이 없음\n"
+                f"  • forces.csv 또는 pose 파일이 손상됨"
+            )
+            self._csv_worker = None
 
         worker.finished_ok.connect(_on_done)
         worker.failed.connect(_on_fail)
