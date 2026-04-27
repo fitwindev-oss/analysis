@@ -50,6 +50,13 @@ class RecordWorker(QThread):
         if self._recorder is not None:
             self._recorder.manual_random()
 
+    def feed_hit_indicator(self, is_hit_now: bool,
+                            t_ns: Optional[int] = None) -> None:
+        """V6-G3 — forward live hit state from the GUI's CameraView
+        into the recorder so it can time RT for the active cue."""
+        if self._recorder is not None:
+            self._recorder.feed_hit_indicator(is_hit_now, t_ns)
+
     # ── Multi-set strength assessment controls (Phase V1-E) ─────────────────
     # Forward GUI button presses to the recorder's same-named methods.
     # All four are no-ops when no recording is active OR when the active

@@ -80,6 +80,12 @@ class VideoPlayerWidget(QWidget):
         self._cue_track_kpt_idx: Optional[int] = None
         self._cue_phase_counter: int = 0
         self._is_cognitive_reaction: bool = False
+        # V6-G4 — gamified HUD state for cognitive_reaction replay.
+        # Each trial is a dict with t_stim_s, rt_ms, hit, grade. The
+        # HUD at any t_force_s shows the running totals across all
+        # trials whose t_stim has elapsed by t.
+        self._hud_trials: list[dict] = []
+        self._cog_n_total: int = 0
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(2, 2, 2, 2)
@@ -191,6 +197,37 @@ class VideoPlayerWidget(QWidget):
         # Sort by stim time so _active_cue_at can early-exit.
         self._cue_events.sort(key=lambda e: e["t_stim_s"])
 
+        # V6-G4 — load result.json trials so the HUD can replay grades
+        # in lockstep with the cues. Falls back to no-grade HUD when
+        # result.json is missing or empty (analysis hasn't run yet).
+        self._hud_trials = []
+        self._cog_n_total = (meta or {}).get("n_stimuli") \
+            or len(self._cue_events) or 0
+        try:
+            rp = session_dir / "result.json"
+            if rp.exists():
+                payload = json.loads(rp.read_text(encoding="utf-8"))
+                trials = ((payload or {}).get("result") or {}).get("trials") or []
+                # Match each trial to a cue event by index (analyzer
+                # builds the trial list in stim_log order).
+                for i, tr in enumerate(trials):
+                    if not isinstance(tr, dict):
+                        continue
+                    t_stim_s = tr.get("t_stim_s")
+                    if t_stim_s is None and i < len(self._cue_events):
+                        t_stim_s = self._cue_events[i]["t_stim_s"]
+                    if t_stim_s is None:
+                        continue
+                    self._hud_trials.append({
+                        "t_stim_s": float(t_stim_s),
+                        "rt_ms":    tr.get("rt_ms"),
+                        "hit":      bool(tr.get("hit", False)),
+                        "grade":    tr.get("grade"),
+                    })
+                self._hud_trials.sort(key=lambda t: t["t_stim_s"])
+        except Exception:
+            self._hud_trials = []
+
     def unload(self) -> None:
         if self._cap is not None:
             try: self._cap.release()
@@ -204,6 +241,8 @@ class VideoPlayerWidget(QWidget):
         self._cue_track_kpt_idx = None
         self._cue_phase_counter = 0
         self._is_cognitive_reaction = False
+        self._hud_trials = []
+        self._cog_n_total = 0
         self._img.clear()
         self._img.setText("(비디오 없음)")
 
@@ -254,6 +293,7 @@ class VideoPlayerWidget(QWidget):
         # video frame didn't change (e.g. paused on a stim instant). So
         # we always re-render when a cue is active or just expired.
         cue = self._active_cue_at(float(t_force_s))
+        hud = self._hud_state_at(float(t_force_s))
         if frame_idx == self._current_idx and cue is None \
                 and not self._is_cognitive_reaction:
             return
@@ -280,7 +320,7 @@ class VideoPlayerWidget(QWidget):
             ok, frame = self._cap.read()
             if not ok:
                 return
-        self._render(frame, cue=cue)
+        self._render(frame, cue=cue, hud=hud)
 
     def _active_cue_at(self, t_force_s: float) -> Optional[dict]:
         """Return the cue event whose [t_stim, t_stim + _CUE_HOLD_S]
@@ -295,6 +335,65 @@ class VideoPlayerWidget(QWidget):
                 return ev
         return None
 
+    def _hud_state_at(self, t_force_s: float) -> Optional[dict]:
+        """V6-G4 — assemble the gamified HUD state for replay.
+
+        At the given playback time, returns a dict shaped like the
+        live measurement HUD (see CameraView.set_cog_hud_state). The
+        most recent grade burst stays visible for 0.8 s after each
+        trial's resolution time (stim + 1.5 s cue hold).
+        """
+        if not self._is_cognitive_reaction:
+            return None
+        # Lazy import to keep the analyzer cost off the hot path
+        from src.analysis.cognitive_reaction import live_cri_after
+        from src.ui.widgets.cognitive_hud import GRADE_MSG_HOLD_FRAMES
+
+        n_done = 0
+        recent_grade: Optional[str] = None
+        recent_rt_ms: Optional[float] = None
+        recent_age_frames: int = GRADE_MSG_HOLD_FRAMES + 1   # expired
+        grade_counts: dict = {"great": 0, "good": 0, "normal": 0,
+                              "bad": 0, "miss": 0}
+        trials_done: list[dict] = []
+
+        # Iterate trials in time order. A trial counts as "done" once
+        # its cue-hold window has elapsed (= grade resolved).
+        for tr in self._hud_trials:
+            t_stim = float(tr["t_stim_s"])
+            t_resolved = t_stim + _CUE_HOLD_S
+            if t_force_s < t_stim:
+                # Future trial — not yet started
+                break
+            if t_force_s < t_resolved:
+                # In flight: stim fired but grade not yet locked in
+                continue
+            n_done += 1
+            g = tr.get("grade") or "miss"
+            if g not in grade_counts:
+                grade_counts[g] = 0
+            grade_counts[g] += 1
+            trials_done.append(tr)
+            # Has its grade burst window started?
+            burst_age_s = t_force_s - t_resolved
+            burst_window_s = (GRADE_MSG_HOLD_FRAMES / 30.0)
+            if 0.0 <= burst_age_s <= burst_window_s:
+                recent_grade = g
+                recent_rt_ms = tr.get("rt_ms")
+                recent_age_frames = int(round(burst_age_s * 30.0))
+
+        # Live CRI = compute_cri across resolved trials so far
+        live_cri = live_cri_after(trials_done) if trials_done else 0.0
+        return {
+            "n_done":            n_done,
+            "n_total":           int(self._cog_n_total or 0),
+            "recent_grade":      recent_grade,
+            "recent_rt_ms":      recent_rt_ms,
+            "recent_age_frames": recent_age_frames,
+            "grade_counts":      grade_counts,
+            "live_cri":          float(live_cri),
+        }
+
     # ── rendering ──────────────────────────────────────────────────────────
     def _redraw_current(self) -> None:
         if self._cap is None or self._current_idx < 0:
@@ -306,14 +405,16 @@ class VideoPlayerWidget(QWidget):
             # Cue redraw happens via the next set_time tick.
             self._render(frame)
 
-    def _render(self, bgr: np.ndarray, cue: Optional[dict] = None) -> None:
+    def _render(self, bgr: np.ndarray, cue: Optional[dict] = None,
+                 hud: Optional[dict] = None) -> None:
         has_skeleton = (self._overlay_enabled and self._pose_series is not None
                         and 0 <= self._current_idx < len(self._pose_series))
         has_cue = cue is not None
+        has_hud = hud is not None
         # Track-keypoint highlight needs both pose AND a tracked body
         # part (set only for cognitive_reaction sessions).
         track_idx = self._cue_track_kpt_idx if has_cue else None
-        if has_skeleton or has_cue:
+        if has_skeleton or has_cue or has_hud:
             bgr = bgr.copy()
         # V6 — evaluate hit before drawing skeleton so the tracked
         # joint dot can switch color in lockstep with the cue.
@@ -337,6 +438,19 @@ class VideoPlayerWidget(QWidget):
             _draw_positional_cue(
                 bgr, (cue["x_norm"], cue["y_norm"]),
                 cue.get("label"), self._cue_phase_counter, hit=is_hit)
+        # V6-G4 — replay HUD (progress / grade burst / counters)
+        if has_hud:
+            from src.ui.widgets.cognitive_hud import draw_full_hud
+            draw_full_hud(
+                bgr,
+                n_done=int(hud.get("n_done", 0) or 0),
+                n_total=int(hud.get("n_total", 0) or 0),
+                recent_grade=hud.get("recent_grade"),
+                recent_rt_ms=hud.get("recent_rt_ms"),
+                recent_age_frames=int(hud.get("recent_age_frames", 0) or 0),
+                grade_counts=hud.get("grade_counts") or {},
+                live_cri=hud.get("live_cri"),
+            )
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         img = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)

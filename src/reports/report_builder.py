@@ -201,21 +201,21 @@ def _reaction_cards(ctx: ReportContext) -> list[MetricCard]:
 
 
 def _cognitive_reaction_cards(ctx: ReportContext) -> list[MetricCard]:
-    """Top-of-report cards for V6 cognitive reaction.
-
-    No norm-based classification yet — there's no published norm table
-    for "screen-cued positional RT with skeleton tracking" specific to
-    the FITWIN setup. Once we collect ~30 sessions we can derive
-    quartile bands and switch to ``_card``.
-    """
+    """Top-of-report cards for V6 cognitive reaction. V6-G6 surfaces
+    the CRI composite + letter grade as the lead cards so the trainer
+    sees the headline metric first."""
     r = ctx.result or {}
+    cri = r.get("cri")
+    grade = r.get("overall_grade") or "—"
+    label_ko = r.get("overall_label_ko") or ""
+    grade_str = f"{grade}  ({label_ko})" if label_ko else grade
+    cri_str = f"{float(cri):.1f}" if cri is not None else "—"
     return [
-        _plain_card("trial 수", r.get("n_trials", 0), ""),
-        _plain_card("적중률",   r.get("hit_rate_pct"), " %"),
-        _plain_card("평균 RT",  r.get("mean_rt_ms"),   " ms"),
-        _plain_card("평균 MT",  r.get("mean_mt_ms"),   " ms"),
-        _plain_card("평균 공간 오차",
-                    r.get("mean_spatial_error_norm"), ""),
+        _plain_card("CRI 종합 지수", cri_str, " / 100"),
+        _plain_card("종합 등급",     grade_str, ""),
+        _plain_card("적중률",        r.get("hit_rate_pct"), " %"),
+        _plain_card("평균 RT",       r.get("mean_rt_ms"),   " ms"),
+        _plain_card("trial 수",      r.get("n_trials", 0),  ""),
     ]
 
 

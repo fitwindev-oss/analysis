@@ -15,11 +15,13 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import Qt, QTimer, QSize
+from PyQt6.QtCore import Qt, QTimer, QSize, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSizePolicy,
 )
+
+import time
 
 import config
 from src.pose.mediapipe_backend import MP33, MP33_CONNECTIONS
@@ -90,6 +92,11 @@ class _SingleCamTile(QWidget):
         # repaints so brief overshoots still register as a clean ack.
         self._hit_hold_frames_left: int = 0
         self._HIT_HOLD_FRAMES = 12   # ~0.4 s at 30 Hz UI repaint
+        # V6-G3 — game HUD state, set by the parent CameraView from
+        # the recorder's RecorderState. None means "no HUD" (other
+        # tests). Repaint reads these to draw progress / grade burst /
+        # counters via the cognitive_hud module.
+        self._hud_state: Optional[dict] = None
         # Dimensions the pose was computed on — may differ from display if the
         # caller feeds us a different-resolution camera. We key all drawing
         # off the frame's own pixel dimensions so rescaling is not needed.
@@ -154,6 +161,12 @@ class _SingleCamTile(QWidget):
             return
         self._track_kpt_idx = BODY_PART_TO_KP_INDEX.get(body_part)
 
+    def set_hud_state(self, hud: Optional[dict]) -> None:
+        """V6-G3 — drive the in-frame game HUD. ``hud`` is a dict with
+        keys: n_done, n_total, recent_grade, recent_rt_ms,
+        recent_age_frames, grade_counts, live_cri. Pass None to hide."""
+        self._hud_state = hud
+
     def clear(self) -> None:
         self._latest = None
         self._kpts = None
@@ -164,26 +177,32 @@ class _SingleCamTile(QWidget):
         self._hit_hold_frames_left = 0
         self._render_placeholder()
 
-    def repaint_if_dirty(self) -> None:
+    def repaint_if_dirty(self) -> bool:
+        """Render the latest frame. Returns the RAW hit state (no
+        latch) so the parent CameraView can broadcast on transitions
+        without the latch's hold-window smearing the rising edge."""
         if self._latest is None:
-            return
+            return False
         bgr = self._latest
         self._latest = None
         # Copy once if any overlay is going to draw, so we don't mutate
         # the caller's buffer (recorder thread may still be reading it).
         has_skeleton = (self._kpts is not None and self._vis is not None)
         has_cue      = (self._cue_xy is not None)
-        if has_skeleton or has_cue:
+        has_hud      = (self._hud_state is not None)
+        if has_skeleton or has_cue or has_hud:
             bgr = bgr.copy()
         # V6-hit — evaluate hit BEFORE drawing skeleton so we can use
         # the same colored marker on the tracked keypoint when it's in
         # the hit zone (visible cue ↔ tracked dot ↔ skeleton coloring
         # all stay in sync).
+        raw_hit = False
         is_hit = False
         if has_cue and has_skeleton and self._track_kpt_idx is not None:
-            is_hit = self._evaluate_hit(bgr.shape[1], bgr.shape[0])
-            if is_hit:
+            raw_hit = self._evaluate_hit(bgr.shape[1], bgr.shape[0])
+            if raw_hit:
                 self._hit_hold_frames_left = self._HIT_HOLD_FRAMES
+                is_hit = True
             elif self._hit_hold_frames_left > 0:
                 # Hit latch still active — keep "hit" state for a few
                 # repaints so brief overshoots don't flicker the ack.
@@ -198,6 +217,21 @@ class _SingleCamTile(QWidget):
             self._draw_positional_cue(
                 bgr, self._cue_xy, self._cue_label, self._cue_phase,
                 hit=is_hit)
+        # V6-G3 — game HUD overlay (progress bar / grade burst /
+        # counters). Drawn last so it sits on top of skeleton + cue.
+        if has_hud:
+            from src.ui.widgets.cognitive_hud import draw_full_hud
+            h = self._hud_state
+            draw_full_hud(
+                bgr,
+                n_done=int(h.get("n_done", 0) or 0),
+                n_total=int(h.get("n_total", 0) or 0),
+                recent_grade=h.get("recent_grade"),
+                recent_rt_ms=h.get("recent_rt_ms"),
+                recent_age_frames=int(h.get("recent_age_frames", 0) or 0),
+                grade_counts=h.get("grade_counts") or {},
+                live_cri=h.get("live_cri"),
+            )
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         img = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
@@ -207,6 +241,7 @@ class _SingleCamTile(QWidget):
             Qt.TransformationMode.SmoothTransformation,
         )
         self._img.setPixmap(pix)
+        return raw_hit
 
     # ── drawing ────────────────────────────────────────────────────────────
     def _evaluate_hit(self, w: int, h: int) -> bool:
@@ -399,9 +434,19 @@ class CameraView(QWidget):
     # 9:16 (height ≈ 1.78 × width).
     _ASPECT_W_OVER_H = 9 / 16   # = 0.5625
 
+    # V6-G3 — fires when at least one tile reports a hit transition
+    # for the active cognitive_reaction cue. The MeasureTab connects
+    # this signal to RecordWorker.feed_hit_indicator so the recorder
+    # can time RT relative to stim fire instant. Bool payload mirrors
+    # the new is_hit state; t_ns is monotonic_ns for RT precision.
+    cog_hit_state_changed = pyqtSignal(bool, int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._tiles: dict[str, _SingleCamTile] = {}
+        # Last broadcast hit state — only emit when it flips so the
+        # recorder doesn't get hammered every repaint.
+        self._last_emitted_hit: bool = False
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
@@ -485,11 +530,30 @@ class CameraView(QWidget):
         for t in self._tiles.values():
             t.set_track_body_part(body_part)
 
+    def set_cog_hud_state(self, hud: Optional[dict]) -> None:
+        """V6-G3 — broadcast a single HUD state dict to every tile so
+        all camera previews show the same gamified overlay during a
+        cognitive_reaction session. Pass None to clear."""
+        for t in self._tiles.values():
+            t.set_hud_state(hud)
+
     def reset(self) -> None:
         for t in self._tiles.values():
             t.clear()
 
     # ── internals ──────────────────────────────────────────────────────────
     def _flush(self) -> None:
+        any_hit = False
         for t in self._tiles.values():
-            t.repaint_if_dirty()
+            tile_hit = t.repaint_if_dirty()
+            if tile_hit:
+                any_hit = True
+        # V6-G3 — emit only when the aggregated hit state flips so the
+        # recorder doesn't get hammered every repaint.
+        if any_hit != self._last_emitted_hit:
+            self._last_emitted_hit = any_hit
+            try:
+                self.cog_hit_state_changed.emit(
+                    bool(any_hit), int(time.monotonic_ns()))
+            except Exception:
+                pass

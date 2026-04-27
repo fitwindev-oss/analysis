@@ -115,6 +115,58 @@ class CognitiveReactionSection(ReportSection):
         except Exception:
             per_tgt_png = None
 
+        # V6-G6 — CRI summary line on top of the table so the most
+        # important number is the first thing the trainer reads.
+        cri = float(result.get("cri") or 0.0)
+        overall_grade = result.get("overall_grade") or "E"
+        overall_label = result.get("overall_label_ko") or "부족"
+        gc = result.get("grade_counts") or {}
+
+        # Color the CRI badge by performance band
+        if cri >= 85:    cri_color = "#FFB300"  # gold
+        elif cri >= 70:  cri_color = "#2E7D32"  # green
+        elif cri >= 55:  cri_color = "#F9A825"  # yellow
+        elif cri >= 40:  cri_color = "#E64A19"  # orange
+        else:            cri_color = "#C62828"  # red
+
+        cri_html = (
+            f"<div style='background:#FAFAFA; border:1px solid #E0E0E0; "
+            f"padding:10px 14px; margin-bottom:10px; "
+            f"display:flex; justify-content:space-between; "
+            f"align-items:center; border-radius:6px;'>"
+            f"<div>"
+            f"<div style='font-size:11px; color:#888;'>"
+            f"종합 인지반응 지수 (CRI)</div>"
+            f"<div style='font-size:28px; font-weight:bold; color:{cri_color};'>"
+            f"{cri:.1f} <span style='font-size:18px;'>"
+            f"/ 100</span></div>"
+            f"</div>"
+            f"<div style='text-align:right;'>"
+            f"<div style='font-size:11px; color:#888;'>등급</div>"
+            f"<div style='font-size:24px; font-weight:bold; color:{cri_color};'>"
+            f"{overall_grade} <span style='font-size:14px; "
+            f"color:#666;'>({overall_label})</span></div>"
+            f"</div>"
+            f"</div>"
+        )
+
+        # Grade-counts strip
+        grade_chips_html = (
+            "<div style='display:flex; gap:8px; margin-bottom:10px; "
+            "font-size:11px;'>"
+            f"<span style='background:#FFB300; color:#000; padding:3px 8px; "
+            f"border-radius:3px;'>탁월 {gc.get('great', 0)}</span>"
+            f"<span style='background:#2E7D32; color:#fff; padding:3px 8px; "
+            f"border-radius:3px;'>양호 {gc.get('good', 0)}</span>"
+            f"<span style='background:#F9A825; color:#000; padding:3px 8px; "
+            f"border-radius:3px;'>보통 {gc.get('normal', 0)}</span>"
+            f"<span style='background:#E64A19; color:#fff; padding:3px 8px; "
+            f"border-radius:3px;'>지연 {gc.get('bad', 0)}</span>"
+            f"<span style='background:#9E9E9E; color:#fff; padding:3px 8px; "
+            f"border-radius:3px;'>미응답 {gc.get('miss', 0)}</span>"
+            "</div>"
+        )
+
         rows = [
             ("추적 부위",         body_part_ko),
             ("위치 수",           f"{int(result.get('n_positions') or 0)} 방향"),
@@ -123,12 +175,20 @@ class CognitiveReactionSection(ReportSection):
              f"{result.get('n_valid', 0)} / "
              f"{result.get('n_no_response', 0)}"),
             ("적중률",            _fmt_pct(hit_pct)),
+            # V6-G6 — sub-scores
+            ("평균 점수 MS (속도+정확도)",
+             f"{float(result.get('mean_score') or 0):.1f} / 100"),
+            ("정확도 점수 AS",
+             f"{float(result.get('accuracy_score') or 0):.1f} / 100"),
+            ("일관성 점수 CS (1−CV)",
+             f"{float(result.get('consistency_score') or 0):.1f} / 100"),
             ("평균 RT (반응 시간)",  _fmt_ms(result.get("mean_rt_ms"))),
             ("중앙값 RT",          _fmt_ms(result.get("median_rt_ms"))),
             ("평균 MT (이동 시간)",  _fmt_ms(result.get("mean_mt_ms"))),
             ("평균 Total (RT+MT)", _fmt_ms(result.get("mean_total_ms"))),
             ("평균 공간 오차 (정규화)",
              _fmt_norm(result.get("mean_spatial_error_norm"))),
+            ("RT 변동계수 CV", f"{float(result.get('cv_rt') or 0):.3f}"),
         ]
         rows_html = "".join(
             f"<tr><td style='padding:4px 10px; color:#555;'>{k}</td>"
@@ -190,8 +250,11 @@ class CognitiveReactionSection(ReportSection):
         <h2 style='margin-top:20px;'>인지 반응 (V6)</h2>
         <p style='color:#666; font-size:12px; margin:0 0 8px;'>
           화면에 표시된 위치로 {body_part_ko}을(를) 이동시키는 시지각·인지·운동
-          통합 반응 검사. RT는 자극 → 동작 시작, MT는 동작 시작 → 목표 도달.
+          통합 반응 검사. CRI는 속도(50%) + 정확도(30%) + 일관성(20%)
+          가중 합성. RT 임계: 350ms 탁월 / 500ms 양호 / 750ms 보통.
         </p>
+        {cri_html}
+        {grade_chips_html}
         <table style='width:100%; border-collapse:collapse;
                       font-size:12px; background:#FAFAFA;
                       border:1px solid #E0E0E0; margin-bottom:12px;'>

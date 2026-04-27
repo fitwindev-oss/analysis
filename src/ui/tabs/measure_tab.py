@@ -821,6 +821,14 @@ class MeasureTab(QWidget):
         self._worker.camera_frame.connect(self._camera_view.on_camera_frame)
         self._worker.daq_frame.connect(self._dashboard.on_daq_frame)
         self._worker.daq_frame.connect(self._on_daq_frame_encoders)
+        # V6-G3 — wire CameraView's per-tile hit transitions into the
+        # recorder so RT for the active cognitive_reaction cue is timed
+        # using the same predicate the operator sees on screen.
+        try:
+            self._camera_view.cog_hit_state_changed.connect(
+                self._worker.feed_hit_indicator)
+        except Exception:
+            pass
 
         # Start realtime pose overlay if the user opted in
         want_live  = bool(opts.get("_live_pose", False))
@@ -905,6 +913,30 @@ class MeasureTab(QWidget):
             getattr(st, "cog_target_y_norm", None),
             getattr(st, "cog_target_label",  None),
         )
+        # V6-G3 — forward the gamified HUD state to the camera tiles.
+        # Only active for cognitive_reaction; passing None for other
+        # tests clears any prior overlay.
+        if test == "cognitive_reaction":
+            import time as _time
+            grade_age_frames = 0
+            t_grade_ns = int(getattr(st, "cog_recent_grade_t_ns", 0) or 0)
+            if t_grade_ns > 0:
+                # Convert monotonic_ns delta to ~30 Hz repaint frames
+                age_s = max(0.0,
+                             (_time.monotonic_ns() - t_grade_ns) / 1e9)
+                grade_age_frames = int(round(age_s * 30.0))
+            hud = {
+                "n_done":            int(getattr(st, "cog_progress_done", 0) or 0),
+                "n_total":           int(getattr(st, "cog_progress_total", 0) or 0),
+                "recent_grade":      getattr(st, "cog_recent_grade", None),
+                "recent_rt_ms":      getattr(st, "cog_recent_rt_ms", None),
+                "recent_age_frames": grade_age_frames,
+                "grade_counts":      getattr(st, "cog_grade_counts", {}) or {},
+                "live_cri":          float(getattr(st, "cog_live_cri", 0.0) or 0.0),
+            }
+            self._camera_view.set_cog_hud_state(hud)
+        else:
+            self._camera_view.set_cog_hud_state(None)
 
     def _on_finished(self, result: dict) -> None:
         # Realtime overlay no longer needed — kill the live worker

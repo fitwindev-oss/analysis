@@ -236,6 +236,17 @@ class RecorderState:
     cog_target_x_norm:  Optional[float] = None
     cog_target_y_norm:  Optional[float] = None
     cog_target_label:   Optional[str]   = None
+    # ── V6-G3 — gamified HUD state (cognitive_reaction only) ────────────
+    # Drives the in-frame progress bar / grade burst / counter chips.
+    # See src.ui.widgets.cognitive_hud for the drawing helpers.
+    cog_progress_done:        int   = 0       # # stims fired so far
+    cog_progress_total:       int   = 0       # = cfg.n_stimuli when active
+    cog_recent_grade:         Optional[str]   = None
+    cog_recent_rt_ms:         Optional[float] = None
+    cog_recent_grade_t_ns:    int   = 0       # monotonic_ns when grade fired
+                                                # (CameraView derives age_frames)
+    cog_grade_counts:         dict  = field(default_factory=dict)
+    cog_live_cri:             float = 0.0
     # ── Multi-set strength assessment (Phase V1-D) ─────────────────────
     # Populated only when test == "strength_3lift". The current set
     # being recorded (or just rested between) and the rest countdown.
@@ -358,6 +369,24 @@ class SessionRecorder:
         self._trig_skip_rest: bool    = False
         self._trig_end_session: bool  = False
 
+        # ── V6-G3 — live cognitive-reaction grading state ─────────────
+        # ``_cog_active_stim`` describes the cue currently displayed on
+        # screen; populated in _fire_stim and consumed in _tick_recording
+        # when the cue window expires. Fields:
+        #   stim_t_ns        monotonic_ns at fire time (used as RT origin)
+        #   target_label     "pos_E" etc.
+        #   deadline_ns      stim_t_ns + 1.5s (resolution time)
+        #   first_hit_t_ns   monotonic_ns of the first detected hit, or
+        #                    None if the subject never reached the cue
+        # ``_cog_trials`` is the running list of resolved trials used for
+        # the live CRI badge (HUD progress bar). Each is a dict with
+        # rt_ms / hit / grade so compute_cri can consume directly.
+        self._cog_active_stim: Optional[dict] = None
+        self._cog_trials: list[dict] = []
+        self._cog_grade_counts: dict[str, int] = {
+            "great": 0, "good": 0, "normal": 0, "bad": 0, "miss": 0
+        }
+
     # ── public API ──────────────────────────────────────────────────────────
     def set_callbacks(self, *, on_camera_frame: Optional[CameraFrameCB] = None,
                       on_daq_frame: Optional[DaqFrameCB] = None,
@@ -410,6 +439,25 @@ class SessionRecorder:
         whatever sets have been completed so far. Distinct from
         ``cancel()`` (which discards the recording entirely)."""
         self._trig_end_session = True
+
+    def feed_hit_indicator(self, is_hit_now: bool,
+                            t_ns: Optional[int] = None) -> None:
+        """V6-G3 — GUI feeds live hit state back to the recorder so we
+        can time RT for the active cognitive_reaction cue.
+
+        Called from the GUI thread (CameraView's repaint loop) every
+        time the hit latch flips. Only the FIRST hit per stim is
+        recorded — subsequent True calls within the same cue window
+        are no-ops so wrist jitter inside the tolerance ring doesn't
+        re-time RT.
+        """
+        if not is_hit_now:
+            return
+        s = self._cog_active_stim
+        if s is None:
+            return
+        if s.get("first_hit_t_ns") is None:
+            s["first_hit_t_ns"] = int(t_ns or time.monotonic_ns())
 
     def manual_reaction(self, response_type: str) -> None:
         """Queue a reaction stimulus / VRT cue from the operator.
@@ -548,28 +596,18 @@ class SessionRecorder:
     def _start_hardware(self) -> None:
         # DAQ
         self._daq = DaqReader()
-        # Phase V6 fix — smart-wait is a force-plate stance gate (waits
-        # until both feet are stable on the plate). The cognitive_reaction
-        # test is a hand/foot reach driven by screen cues — there's no
-        # force-plate stance to evaluate, so we skip StabilityDetector
-        # for it. But we STILL need the recorder to wait out the DAQ
-        # zero-cal (5 s) before recording begins, otherwise the first
-        # ~0.5-1.5 s of forces.csv contains pre-cal noise that shows up
-        # in replay even though the analyzer doesn't use it. The
-        # ``_zero_cal_only`` flag below makes the wait phase do exactly
-        # that — show the zero-cal countdown, then auto-transition to
-        # the fixed countdown without ever consulting a stability
-        # detector. Net effect: cognitive_reaction sessions get a clean
-        # ``wait → countdown → recording`` flow with the same noise-free
-        # baseline guarantee as balance/CMJ.
-        wants_smart_wait = (
-            self.cfg.use_smart_wait
-            and self.cfg.test != "cognitive_reaction"
-        )
-        self._zero_cal_only: bool = (
-            self.cfg.test == "cognitive_reaction"
-            and self.cfg.use_smart_wait)
-        if wants_smart_wait:
+        # Phase V6-G5 — UNIFIED routine. Every test (including
+        # cognitive_reaction) now goes through the standard
+        # zero-cal → wait-for-two-foot-stance → countdown → recording
+        # flow. cognitive_reaction's earlier "zero-cal-only" carve-out
+        # has been removed: the operator-friendly behavior is "stand on
+        # the plate so we know you're ready, then we start". During the
+        # cue/reach phase the subject can still shift weight freely —
+        # ``_track_departures`` (V6 fix) keeps the runtime departure
+        # tracker disabled for cognitive_reaction so reach-induced
+        # weight shifts don't show up as ⚠ 이탈 banners.
+        self._zero_cal_only = False  # legacy flag — unused after G5
+        if self.cfg.use_smart_wait:
             stance_mode = self.cfg.stance if self.cfg.test in (
                 "balance_eo", "balance_ec") else "two"
             # Let StabilityDetector pick stance-appropriate hold time:
@@ -579,11 +617,6 @@ class SessionRecorder:
                 timeout_s=self.cfg.wait_timeout_s,
                 stance_mode=stance_mode,
             )
-        elif self._zero_cal_only:
-            self._log(
-                "smart-wait → zero-cal-only for cognitive_reaction "
-                "(no plate stance, but waits out DAQ zero-cal so "
-                "forces.csv baseline is clean)")
         # Phase V6 fix — departure tracking applies only to tests where
         # the subject is supposed to remain on the plate. For
         # cognitive_reaction the subject doesn't have to be on the plate
@@ -638,7 +671,7 @@ class SessionRecorder:
     def _loop(self) -> None:
         cfg = self.cfg
         # Initial phase
-        if self._stability is not None or getattr(self, "_zero_cal_only", False):
+        if self._stability is not None:
             self._state.phase = "wait"
             # Give DAQ ~5.5 s to finish zero-cal (config.ZERO_CAL_SECONDS
             # is 5 s; +0.5 s margin covers DAQ thread start-up jitter).
@@ -714,16 +747,8 @@ class SessionRecorder:
         # momentarily has no fresh frame, we don't flip the banner back.
         self._state.zeroing = False
         self._state.zero_cal_remaining_s = 0.0
-        # Phase V6 — cognitive_reaction has no stance to evaluate. Once
-        # zero-cal completes we auto-transition to the fixed countdown,
-        # so the run-loop can never get stuck waiting for a "READY"
-        # stance that wouldn't apply.
-        if getattr(self, "_zero_cal_only", False):
-            self._wait_duration_s = phase_s
-            self._state.phase = "countdown"
-            self._t_phase_ns = now_ns
-            self._log("zero-cal complete → countdown")
-            return
+        # Phase V6-G5 — the zero-cal-only carve-out is removed; every
+        # test now follows the standard stance-gate path below.
         frame = self._daq_latest_frame
         if frame is None:
             return
@@ -811,6 +836,14 @@ class SessionRecorder:
             self._state.cog_target_x_norm = None
             self._state.cog_target_y_norm = None
             self._state.cog_target_label  = None
+
+        # V6-G3 — resolve the active cognitive_reaction cue when its
+        # 1.5 s display window has elapsed. RT = first-hit-time minus
+        # stim-fire-time, or no_response if the GUI never reported a
+        # hit. The grade burst on the HUD is driven by these values.
+        if (self._cog_active_stim is not None
+                and now_ns >= self._cog_active_stim["deadline_ns"]):
+            self._resolve_cog_stim(now_ns)
 
         # Fall-off detection for balance tests: total_n below 30%BW for
         # >= 2 s contiguous → abort the recording. Rationale: a subject
@@ -983,8 +1016,21 @@ class SessionRecorder:
             self._state.cog_target_x_norm = float(tx)
             self._state.cog_target_y_norm = float(ty)
             self._state.cog_target_label  = response_type
+            # V6-G3 — start a fresh resolution window for live grading.
+            stim_t = time.monotonic_ns()
+            self._cog_active_stim = {
+                "stim_t_ns":     stim_t,
+                "target_label":  response_type,
+                # Cue holds 1.5 s on screen; we resolve when it expires.
+                "deadline_ns":   stim_t + int(1.5e9),
+                "first_hit_t_ns": None,
+            }
         self._stim_events.append(ev)
         self._state.n_stim_fired = len(self._stim_events)
+        # V6-G3 — HUD progress: set total once, increment done per stim
+        if self.cfg.test == "cognitive_reaction":
+            self._state.cog_progress_total = int(self.cfg.n_stimuli)
+            self._state.cog_progress_done = len(self._stim_events)
         # Hold the visual cue longer for cognitive_reaction (subject
         # needs time to physically reach the position) than for the
         # classic reaction test where the response is a single jump.
@@ -995,6 +1041,59 @@ class SessionRecorder:
         self._state.stim_banner = label
         self._beep(1500, 120)
         self._log(f"STIM #{len(self._stim_events)} response={response_type}")
+
+    def _resolve_cog_stim(self, now_ns: int) -> None:
+        """V6-G3 — close the active cognitive_reaction cue and emit a
+        grade burst into RecorderState.
+
+        Called from ``_tick_recording`` when the cue's 1.5 s display
+        window has elapsed. Computes RT from the first-hit time the
+        GUI reported via ``feed_hit_indicator``; if no hit was reported,
+        the trial is graded "miss" (rt_ms=None).
+
+        Side effects (visible to the GUI through the next state emit):
+          - cog_recent_grade / cog_recent_rt_ms / cog_recent_grade_t_ns
+          - cog_grade_counts (running totals per grade)
+          - cog_live_cri (recomputed across all resolved trials)
+        """
+        # Local import — keeps capture-layer free of the analysis layer
+        # at module import time so legacy CLI scripts that never touch
+        # cognitive_reaction don't pay the analyzer's import cost.
+        from src.analysis.cognitive_reaction import (
+            grade_trial, live_cri_after,
+        )
+        s = self._cog_active_stim
+        self._cog_active_stim = None
+        if s is None:
+            return
+        first_hit = s.get("first_hit_t_ns")
+        if first_hit is not None:
+            rt_ms = max(0.0, (first_hit - s["stim_t_ns"]) / 1e6)
+            hit = True
+        else:
+            rt_ms = None
+            hit = False
+        grade = grade_trial(rt_ms, hit)
+        # Record for live CRI accumulation
+        self._cog_trials.append({
+            "rt_ms": rt_ms,
+            "hit":   hit,
+            "grade": grade,
+        })
+        self._cog_grade_counts[grade] = (
+            self._cog_grade_counts.get(grade, 0) + 1)
+        # Push into RecorderState — CameraView consumes these via the
+        # state_changed signal each tick.
+        self._state.cog_recent_grade = grade
+        self._state.cog_recent_rt_ms = (
+            float(rt_ms) if rt_ms is not None else None)
+        self._state.cog_recent_grade_t_ns = int(now_ns)
+        self._state.cog_grade_counts = dict(self._cog_grade_counts)
+        self._state.cog_live_cri = float(live_cri_after(self._cog_trials))
+        rt_str = f"{rt_ms:.0f}ms" if rt_ms is not None else "miss"
+        self._log(
+            f"COG TRIAL → {grade.upper()}  rt={rt_str}  "
+            f"CRI={self._state.cog_live_cri:.1f}")
 
     # ── finalisation ────────────────────────────────────────────────────────
     def _finalize(self) -> dict:
