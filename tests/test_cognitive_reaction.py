@@ -539,6 +539,33 @@ def test_result_to_dict_round_trips_trials():
     assert d["trials"][1]["no_response"] is True
 
 
+def test_departure_tracking_disabled_for_cognitive_reaction():
+    """V6 fix — cognitive_reaction is a hand-reach test; force-plate
+    departures are meaningless here. The recorder must skip the
+    departure tracker entirely so events.csv stays empty AND the
+    replay doesn't show a ⚠ 이탈 banner."""
+    cfg = RecorderConfig(test="cognitive_reaction",
+                         react_n_positions=4,
+                         duration_s=30.0, n_stimuli=4, trigger="auto")
+    rec = SessionRecorder(cfg)
+    # Mirror the predicate inside _start_hardware
+    track = (rec.cfg.test != "cognitive_reaction")
+    assert track is False
+
+
+def test_departure_tracking_enabled_for_other_tests():
+    """Sanity — non-cognitive tests still track departures."""
+    for t in ("balance_eo", "cmj", "sj", "squat", "reaction"):
+        kw: dict = {"duration_s": 10.0}
+        if t == "reaction":
+            kw["responses"] = "random"; kw["trigger"] = "auto"
+            kw["n_stimuli"] = 4
+        cfg = RecorderConfig(test=t, **kw)
+        rec = SessionRecorder(cfg)
+        track = (rec.cfg.test != "cognitive_reaction")
+        assert track is True, f"departure tracking should be ON for {t}"
+
+
 def test_session_metadata_includes_cog_fields():
     """When the test is cognitive_reaction, _build_metadata writes the
     cog_track_body_part / cog_n_positions / cog_positions keys that

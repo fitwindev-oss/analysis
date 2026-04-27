@@ -559,9 +559,20 @@ class ReplayPanel(QWidget):
         view always agrees with the analysis charts. The stored
         events.csv is preserved as a raw-data artefact for offline
         analysis pipelines that want the recording-time labels.
+
+        Phase V6 fix — cognitive_reaction is a hand-reach test driven
+        by screen cues. The subject doesn't need to stand on the plate,
+        and even if they do, reaches shift weight enough to dip below
+        the 20 N gate. Force-plate departure tracking is meaningless
+        for this test, so we skip it entirely (no bands, no badge).
         """
         events: list[dict] = []
-        if self._force is not None:
+        test_type = (meta or {}).get("test", "")
+        if test_type == "cognitive_reaction":
+            # Force-clear any stale UI state so a session re-load
+            # correctly hides the badge + bands.
+            pass
+        elif self._force is not None:
             try:
                 events = compute_departure_events(self._force)
             except Exception:

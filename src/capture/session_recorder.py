@@ -584,6 +584,15 @@ class SessionRecorder:
                 "smart-wait → zero-cal-only for cognitive_reaction "
                 "(no plate stance, but waits out DAQ zero-cal so "
                 "forces.csv baseline is clean)")
+        # Phase V6 fix — departure tracking applies only to tests where
+        # the subject is supposed to remain on the plate. For
+        # cognitive_reaction the subject doesn't have to be on the plate
+        # at all (it's a reach test driven by screen cues). Even if they
+        # are, hand reaches shift weight off-plate momentarily and that
+        # registers as a "이탈" event. Disable the tracker for this test
+        # so the replay doesn't show false-positive ⚠ 이탈 banners.
+        track_departures = (self.cfg.test != "cognitive_reaction")
+        self._track_departures = track_departures
         if self._daq.connect():
             def _on_daq(fr: DaqFrame) -> None:
                 # Single reference assignment is atomic in CPython, so
@@ -599,9 +608,10 @@ class SessionRecorder:
                     with self._daq_lock:
                         self._daq_frames.append(fr)
                         self._cop_states.append(on_plate)
-                    # Streaming event tracker — needs t relative to
-                    # record_start so events line up with t_s in CSVs.
-                    if self._rec_start_wall is not None:
+                    # Streaming event tracker — only for tests where
+                    # plate stance matters.
+                    if (track_departures
+                            and self._rec_start_wall is not None):
                         self._dep_tracker.update(
                             on_plate=on_plate,
                             t_s=fr.t_wall - self._rec_start_wall,
